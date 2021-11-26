@@ -17,6 +17,10 @@ int main(int argc, char** argv) {
         ERROR("usage: ./main input_image output_image.jpg");
     }
 
+    #ifdef _WIN32
+    fprintf(stderr, "WARNING: This code produces corrupted JPEGs on Windows for some reason, try WSL or something\n");
+    #endif
+
 
     int width, height, num_components;
     unsigned char* data = stbi_load(argv[1], &width, &height, &num_components, 0);
