@@ -2,6 +2,8 @@
 # Created by https://www.toptal.com/developers/gitignore/api/visualstudio,visualstudiocode,cuda
 # Edit at https://www.toptal.com/developers/gitignore?templates=visualstudio,visualstudiocode,cuda
 
+*.out
+
 ### CUDA ###
 *.i
 *.ii
