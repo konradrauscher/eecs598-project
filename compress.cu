@@ -1,7 +1,7 @@
 #include <wb.h>
 
-#define pi 3.142857f
-#define sqrt_2 0.707106781f
+#define pi 3.14159265f
+#define sqrt1_2 0.707106781f
 
 __global__ void kernel_float_to_char(float* input, unsigned char* output, uint num) {
 
@@ -12,6 +12,71 @@ __global__ void kernel_float_to_char(float* input, unsigned char* output, uint n
     }
 
     return;
+}
+
+// Naive kernel with no optimization for coalescing
+__global__ void kernel_rgb_to_ycbcr(const float* input, float* output_y, float* output_cr, float* output_cb, uint num_rgb_pix){
+    
+        uint idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+        if(idx >  num_rgb_pix) return;
+
+        float r = input[idx*3];
+        float g = input[idx*3 + 1];
+        float b = input[idx*3 + 2];
+
+        output_y[idx]   =  0.f   + (0.299f   * r) + (0.587f   * g) + (0.114f   * b);
+        output_cr[idx] = 128.f - (0.16874f * r) - (0.33126f * g) + (0.5f     * b);
+        output_cb[idx] = 128.f + (0.5f     * r) - (0.41869f * g) - (0.08131f * b);
+}
+
+// Each thread loops over the pixels in its block to generate a single output pixel.
+// Call this three times, once for each channel
+__global__ void kernel_block_dct(const float* inputData, float* outputData, const float dct[8][8], uint width, uint height){
+    assert(blockDim.x == 8);
+    assert(blockDim.y == 8);
+
+    uint j_block = blockIdx.y, i_block = blockIdx.x;
+    uint j_tile = threadIdx.y, i_tile = threadIdx.x;
+
+    size_t i = i_block * 8 + i_tile; // overall i index in image
+    size_t j = j_block * 8 + j_tile; // overall j index in image
+
+    float c_i = (i_tile == 0) ? sqrt1_2 : 1.0f;
+    float c_j = (j_tile == 0) ? sqrt1_2 : 1.0f;
+
+    float sum = 0;
+
+    // loop within an 8x8 tile to generate sum
+    for (size_t j_sum = 0; j_sum < 8; j_sum++) {
+        for (size_t i_sum = 0; i_sum < 8; i_sum++) {
+        
+            float cos1 = dct[i_sum][i_tile];
+            float cos2 = dct[j_sum][j_tile];
+
+            size_t x = i_block * 8 + i_sum;
+            size_t y = j_block * 8 + j_sum;
+
+            sum += (inputData[y * width + x] * cos1 * cos2);
+        }
+    }
+
+    outputData[j * width + i] = 0.25 * c_i * c_j * sum;
+}
+
+//Call this once for each channel
+__global__ void kernel_quantize_dct_output(const float* inputData, uint8_t* outputData, const uint8_t Q[8][8], uint width, uint height)
+{
+    assert(blockDim.x == 8);
+    assert(blockDim.y == 8);
+
+    uint j_block = blockIdx.y, i_block = blockIdx.x;
+    uint j_tile = threadIdx.y, i_tile = threadIdx.x;
+    
+    size_t i = i_block * 8 + i_tile;
+    size_t j = j_block * 8 + j_tile;
+
+    outputData[j * imageWidth + i] = (uint8_t) round(inputData[j * imageWidth + i] / Q[j_tile][i_tile]);
 }
 
 class Compressor {
@@ -214,8 +279,8 @@ void Compressor::sequential_dct(float* inputData, float* outputData, int width, 
 
                     size_t i = i_block * 8 + i_tile; // overall i index in image
 
-                    float c_i = (i_tile == 0) ? sqrt_2 : 1.0;
-                    float c_j = (j_tile == 0) ? sqrt_2 : 1.0;
+                    float c_i = (i_tile == 0) ? sqrt1_2 : 1.0;
+                    float c_j = (j_tile == 0) ? sqrt1_2 : 1.0;
 
                     float sum = 0;
 
