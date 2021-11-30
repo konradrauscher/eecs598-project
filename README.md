@@ -9,3 +9,8 @@ Conversion from RGB to YCbCr: https://en.wikipedia.org/wiki/YCbCr#JPEG_conversio
 For JPEG compression 4:2:2 and 4:2:0 chrominance subsampling is common. 
 4:2:0 may be used in this project.
 Chrominance subsampling: http://dougkerr.net/Pumpkin/articles/Subsampling.pdf
+
+JPEG specification: https://www.w3.org/Graphics/JPEG/itu-t81.pdf
+Quantization tables are taken from here (Annex K, p. 143)
+
+Currently the sequential code only works for images of size 8w x 8h where w and h are any positive integers
