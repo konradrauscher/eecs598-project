@@ -1,7 +1,18 @@
 #include <wb.h>
+#include <vector>
 
 #define pi 3.14159265f
 #define sqrt1_2 0.707106781f
+
+#define wbCheck(stmt)                                                     \
+  do {                                                                    \
+    cudaError_t err = stmt;                                               \
+    if (err != cudaSuccess) {                                             \
+      wbLog(ERROR, "CUDA error: ", cudaGetErrorString(err));              \
+      wbLog(ERROR, "Failed to run stmt ", #stmt);                         \
+      exit(-1);                                                           \
+    }                                                                     \
+  } while (0)
 
 __global__ void kernel_float_to_char(float* input, unsigned char* output, uint num) {
 
@@ -15,15 +26,15 @@ __global__ void kernel_float_to_char(float* input, unsigned char* output, uint n
 }
 
 // Naive kernel with no optimization for coalescing
-__global__ void kernel_rgb_to_ycbcr(const float* input, float* output_y, float* output_cr, float* output_cb, uint num_rgb_pix){
+__global__ void kernel_rgb_to_ycbcr(const float* input, float* output_y, float* output_cb, float* output_cr, uint num_rgb_pix){
     
         uint idx = blockIdx.x * blockDim.x + threadIdx.x;
 
         if(idx >  num_rgb_pix) return;
 
-        float r = input[idx*3];
-        float g = input[idx*3 + 1];
-        float b = input[idx*3 + 2];
+        float r = input[idx*3]     * 255.f;
+        float g = input[idx*3 + 1] * 255.f;
+        float b = input[idx*3 + 2] * 255.f;
 
         output_y[idx]   =  0.f   + (0.299f   * r) + (0.587f   * g) + (0.114f   * b);
         output_cr[idx] = 128.f - (0.16874f * r) - (0.33126f * g) + (0.5f     * b);
@@ -32,7 +43,7 @@ __global__ void kernel_rgb_to_ycbcr(const float* input, float* output_y, float* 
 
 // Each thread loops over the pixels in its block to generate a single output pixel.
 // Call this three times, once for each channel
-__global__ void kernel_block_dct(const float* inputData, float* outputData, const float dct[8][8], uint width, uint height){
+__global__ void kernel_block_dct(const float* inputData, float* outputData, const float* dct, uint width, uint height){
     assert(blockDim.x == 8);
     assert(blockDim.y == 8);
 
@@ -51,8 +62,8 @@ __global__ void kernel_block_dct(const float* inputData, float* outputData, cons
     for (size_t j_sum = 0; j_sum < 8; j_sum++) {
         for (size_t i_sum = 0; i_sum < 8; i_sum++) {
         
-            float cos1 = dct[i_sum][i_tile];
-            float cos2 = dct[j_sum][j_tile];
+            float cos1 = dct[i_sum*8 + i_tile];
+            float cos2 = dct[j_sum*8 + j_tile];
 
             size_t x = i_block * 8 + i_sum;
             size_t y = j_block * 8 + j_sum;
@@ -65,7 +76,7 @@ __global__ void kernel_block_dct(const float* inputData, float* outputData, cons
 }
 
 //Call this once for each channel
-__global__ void kernel_quantize_dct_output(const float* inputData, uint8_t* outputData, const uint8_t Q[8][8], uint width, uint height)
+__global__ void kernel_quantize_dct_output(const float* inputData, uint8_t* outputData, const uint8_t* Q, uint width, uint height)
 {
     assert(blockDim.x == 8);
     assert(blockDim.y == 8);
@@ -76,8 +87,46 @@ __global__ void kernel_quantize_dct_output(const float* inputData, uint8_t* outp
     size_t i = i_block * 8 + i_tile;
     size_t j = j_block * 8 + j_tile;
 
-    outputData[j * imageWidth + i] = (uint8_t) round(inputData[j * imageWidth + i] / Q[j_tile][i_tile]);
+    outputData[j * width + i] = (uint8_t) round(inputData[j * width + i] / Q[j_tile*8 + i_tile]);
 }
+
+
+template<typename T>
+class DevicePtr{
+private:
+    void* mData;
+    void cleanup(){
+        if(mData){
+            cudaFree(mData);
+            mData = nullptr;
+        }
+    }
+public:
+    DevicePtr(): mData(nullptr){
+
+    }
+    DevicePtr(size_t size): mData(nullptr) {
+        reset(size);
+    }
+    ~DevicePtr(){
+        cleanup();
+    }
+
+    void reset(size_t size = 0){
+        cleanup();
+        if(size != 0){
+            wbCheck(cudaMalloc(&mData, size * sizeof(T)));
+        }
+    }
+
+    T* get() const {
+        return (T*)mData;
+    }
+
+    T& operator[](size_t i) const {
+        return get()[i];
+    }
+};
 
 class Compressor {
 private:
@@ -85,8 +134,8 @@ private:
     int imageHeight;
     int imageChannels;
     wbImage_t inputImage;
-    const char *inputImageFile;
-    float *hostInputImageData;
+    const char* inputImageFile;
+    float* hostInputImageData;
     // Discrete cosine transform lookup: cos((2i+1)jpi/16) = dct[i][j]
     const float dct[8][8] = {
         { 1.00000000,  0.98076987,  0.92381907,  0.83133787,  0.70688325,  0.55524170,  0.38224527,  0.19454771 },	
@@ -158,6 +207,11 @@ private:
       0xE2,0xE3,0xE4,0xE5,0xE6,0xE7,0xE8,0xE9,0xEA,0xF2,0xF3,0xF4,0xF5,0xF6,0xF7,0xF8,0xF9,0xFA 
     };
 
+    DevicePtr<float> dct_device;
+    DevicePtr<uint8_t> Q_l_device;
+    DevicePtr<uint8_t> Q_c_device;
+    DevicePtr<uint8_t> zigzag_map_device;
+
     void float_to_char(unsigned char* hostCharData);
     void rgb_to_ycbcr(unsigned char* hostCharData, unsigned char* hostYCbCrData);
     void sequential_dct(float* inputData, float* outputData, int width, int height);
@@ -169,7 +223,12 @@ public:
     void parallel_compress();
 };
 
-Compressor::Compressor(wbArg_t args) {
+Compressor::Compressor(wbArg_t args): 
+    : dct_device(64)
+    , Q_l_device(64)
+    , Q_c_device(64)
+    , zigzag_map_device(64)
+{
     wbTime_start(Generic, "Importing data and creating memory on host");
     inputImageFile = wbArg_getInputFile(args, 0);
     inputImage = wbImport(inputImageFile);
@@ -179,20 +238,27 @@ Compressor::Compressor(wbArg_t args) {
     hostInputImageData = wbImage_getData(inputImage);
     wbTime_stop(Generic, "Importing data and creating memory on host");
 
+    wbCheck(cudaMemcpy(dct_device.get(), dct, sizeof(dct), cudaMemcpyHostToDevice));
+    wbCheck(cudaMemcpy(Q_l_device.get(), Q_l, sizeof(Q_l), cudaMemcpyHostToDevice));
+    wbCheck(cudaMemcpy(Q_c_device.get(), Q_c, sizeof(Q_c), cudaMemcpyHostToDevice));
+    wbCheck(cudaMemcpy(zigzag_map_device.get(), zigzag_map, sizeof(zigzag_map), cudaMemcpyHostToDevice));
+    
+
+
+
     printf("Input image size: %4dx%4dx%1d\n", imageWidth, imageHeight, imageChannels);
 }
 
 Compressor::~Compressor() {
-    free(inputImage);
-    free(hostInputImageData);
+    wbImage_delete(inputImage);
 }
 
 void Compressor::sequential_compress() {
 
+    size_t numPix = imageWidth*imageHeight;
+
     // convert from RGB floats to YCbCr in separate channels
-    float* YData  = (float *)malloc(imageWidth*imageHeight*sizeof(float));
-    float* CbData = (float *)malloc(imageWidth*imageHeight*sizeof(float));
-    float* CrData = (float *)malloc(imageWidth*imageHeight*sizeof(float));
+    std::vector<float> YData(numPix), CbData(numPix), CrData(numPix);
 
     for (size_t i = 0; i < imageWidth*imageHeight; i++) {
 
@@ -208,18 +274,14 @@ void Compressor::sequential_compress() {
     // TODO: subsample chrominance using 4:2:0 subsampling
 
     // discrete cosine transform
-    float* YDctData  = (float *)malloc(imageWidth*imageHeight*sizeof(float));
-    float* CbDctData = (float *)malloc(imageWidth*imageHeight*sizeof(float));
-    float* CrDctData = (float *)malloc(imageWidth*imageHeight*sizeof(float));
+    std::vector<float> YDctData(numPix), CbDctData(numPix), CrDctData(numPix);
 
-    sequential_dct(YData, YDctData, imageWidth, imageHeight);
-    sequential_dct(CbData, CbDctData, imageWidth, imageHeight);
-    sequential_dct(CrData, CrDctData, imageWidth, imageHeight);
+    sequential_dct(YData.data(),  YDctData.data(),  imageWidth, imageHeight);
+    sequential_dct(CbData.data(), CbDctData.data(), imageWidth, imageHeight);
+    sequential_dct(CrData.data(), CrDctData.data(), imageWidth, imageHeight);
 
     // quantization
-    unsigned char* YQData  = (unsigned char *)malloc(imageWidth*imageHeight*sizeof(unsigned char));
-    unsigned char* CbQData = (unsigned char *)malloc(imageWidth*imageHeight*sizeof(unsigned char));
-    unsigned char* CrQData = (unsigned char *)malloc(imageWidth*imageHeight*sizeof(unsigned char));
+    std::vector<unsigned char> YQData(numPix), CbQData(numPix), CrQData(numPix);
 
     for (size_t j_block = 0; j_block < imageHeight/8; j_block++) {
         for (size_t i_block = 0; i_block < imageWidth/8; i_block++) {
@@ -238,9 +300,7 @@ void Compressor::sequential_compress() {
     }
 
     //TODO: zigzag rearrange
-    unsigned char* YRearrangedData  = (unsigned char *)malloc(imageWidth*imageHeight*sizeof(unsigned char));
-    unsigned char* CbRearrangedData = (unsigned char *)malloc(imageWidth*imageHeight*sizeof(unsigned char));
-    unsigned char* CrRearrangedData = (unsigned char *)malloc(imageWidth*imageHeight*sizeof(unsigned char));
+    std::vector<unsigned char> YRearrangedData(numPix), CbRearrangedData(numPix), CrRearrangedData(numPix);
 
     for (size_t j_block = 0; j_block < imageHeight/8; j_block++) {
         for (size_t i_block = 0; i_block < imageWidth/8; i_block++) {
@@ -275,22 +335,6 @@ void Compressor::sequential_compress() {
     // Encoded Blocks
     // EOI
 
-    // clean up memory
-    free(YData);
-    free(CbData);
-    free(CrData);
-
-    free(YDctData);
-    free(CbDctData);
-    free(CrDctData);
-
-    free(YQData);
-    free(CbQData);
-    free(CrQData);
-
-    free(YRearrangedData);
-    free(CbRearrangedData);
-    free(CrRearrangedData);
 }
 
 void Compressor::sequential_dct(float* inputData, float* outputData, int width, int height) {
@@ -334,14 +378,49 @@ void Compressor::sequential_dct(float* inputData, float* outputData, int width, 
 }
 
 void Compressor::parallel_compress() {
-    unsigned char* hostCharData = (unsigned char *)malloc(imageWidth*imageHeight*imageChannels*sizeof(unsigned char));
-    unsigned char* hostYCbCrData = (unsigned char *)malloc(imageWidth*imageHeight*imageChannels*sizeof(unsigned char));
 
-    float_to_char(hostCharData);
-    rgb_to_ycbcr(hostCharData, hostYCbCrData);
+    size_t numPix = imageWidth * imageHeight;
+    size_t numEl = numPix * imageChannels;
 
-    free(hostCharData);
-    free(hostYCbCrData);
+    DevicePtr<float> deviceRGBImageData(numEl);
+    DevicePtr<float> deviceYCbCrImageData(numEl);
+    DevicePtr<float> deviceDCTData(numEl);
+    DevicePtr<uint8_t> deviceQuantData(numEl);
+
+    dim3 DimGrid1((imageWidth*imageHeight*imageChannels-1)/1024 + 1, 1, 1);
+    dim3 DimBlock1(1024, 1, 1);
+
+    float* deviceY = deviceYCbCrImageData.get();
+    float* deviceCb = deviceY + numPix;
+    float* deviceCr = deviceCb + numPix;
+
+    kernel_rgb_to_ycbcr<<<DimGrid1, DimBlock1>>>(deviceRGBImageData.get(), deviceY, deviceCb, deviceCr, numPix);
+
+    wbCheck(cudaDeviceSynchronize());
+    
+    float* deviceYDCT = deviceDCTData.get();
+    float* deviceCbDCT = deviceYDCT + numPix;
+    float* deviceCrDCT = deviceCbDCT + numPix;
+
+    dim3 DimGrid2((imageHeight-1)/8+1, (imageWidth-1)/8 + 1, 1);
+    dim3 DimBlock2(8,8,1);
+
+    kernel_block_dct<<<DimGrid2, DimBlock2>>>(deviceY,  deviceYDCT,  dct_device.get(), imageWidth, imageHeight);
+    kernel_block_dct<<<DimGrid2, DimBlock2>>>(deviceCb, deviceCbDCT, dct_device.get(), imageWidth, imageHeight);
+    kernel_block_dct<<<DimGrid2, DimBlock2>>>(deviceCr, deviceCrDCT, dct_device.get(), imageWidth, imageHeight);
+
+    wbCheck(cudaDeviceSynchronize());
+
+    uint8_t* deviceYQuant = deviceQuantData.get();
+    uint8_t* deviceCbQuant = deviceYQuant + numPix;
+    uint8_t* deviceCrQuant = deviceCbQuant + numPix;
+
+    kernel_quantize_dct_output<<<DimGrid2, DimBlock2>>>(deviceYDCT,  deviceYQuant,  Q_l_device.get(), imageWidth, imageHeight);
+    kernel_quantize_dct_output<<<DimGrid2, DimBlock2>>>(deviceCbDCT, deviceCbQuant, Q_c_device.get(), imageWidth, imageHeight);
+    kernel_quantize_dct_output<<<DimGrid2, DimBlock2>>>(deviceCrDCT, deviceCrQuant, Q_c_device.get(), imageWidth, imageHeight);
+
+    wbCheck(cudaDeviceSynchronize());
+
 }
 
 void Compressor::float_to_char(unsigned char* hostCharData) {
@@ -349,6 +428,7 @@ void Compressor::float_to_char(unsigned char* hostCharData) {
 
     float* deviceInputImageData;
     unsigned char* deviceCharData;
+    
 
     cudaMalloc((void **) &deviceInputImageData, imageWidth*imageHeight*imageChannels*sizeof(float));
     cudaMalloc((void **) &deviceCharData, imageWidth*imageHeight*imageChannels*sizeof(unsigned char));

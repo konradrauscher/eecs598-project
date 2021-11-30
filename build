@@ -18,5 +18,5 @@ then
 fi
 # module load cuda
 export PATH=/usr/local/cuda-10.0/bin/:$PATH
-nvcc $1 -L$PWD/libwb/build/ -o $2 -I $PWD/libwb/ -std=c++11 -lwb
+nvcc $1 -L$PWD/libwb/build/ -o $2 -I $PWD/libwb/ -std=c++11 -lwb -O3
 echo "Successfully built $2"
