@@ -21,6 +21,7 @@ private:
     wbImage_t inputImage;
     const char *inputImageFile;
     float *hostInputImageData;
+    float dct[8][8];
 
     void float_to_char(unsigned char* hostCharData);
     void rgb_to_ycbcr(unsigned char* hostCharData, unsigned char* hostYCbCrData);
@@ -44,6 +45,14 @@ Compressor::Compressor(wbArg_t args) {
     wbTime_stop(Generic, "Importing data and creating memory on host");
 
     printf("Input image size: %4dx%4dx%1d\n", imageWidth, imageHeight, imageChannels);
+
+    wbTime_start(Generic, "Generating Discrete Cosine Transform lookup");
+    for (size_t i = 0; i < 8; i++) {
+        for (size_t j = 0; j < 8; j++) {
+            dct[i][j] = std::cos(((2*i+1)*j*pi)/16.0);
+        }
+    }
+    wbTime_stop(Generic, "Generating Discrete Cosine Transform lookup");
 }
 
 Compressor::~Compressor() {
@@ -68,9 +77,9 @@ void Compressor::sequential_compress() {
         float cb = 128 - (0.168736 * r) - (0.331264 * g) + (0.5      * b);
         float cr = 128 + (0.5      * r) - (0.418688 * g) - (0.081312 * b);
 
-        YData[3*i]  = y;
-        CbData[3*i] = cb;
-        CrData[3*i] = cr;
+        YData[i]  = y;
+        CbData[i] = cb;
+        CrData[i] = cr;
     }
 
     // TODO: subsample chrominance using 4:2:0 subsampling
@@ -121,12 +130,12 @@ void Compressor::sequential_dct(float* inputData, float* outputData, int width, 
                     // loop within an 8x8 tile again to generate sum
                     for (size_t i_sum = 0; i_sum < 8; i_sum++) {
                         for (size_t j_sum = 0; j_sum < 8; j_sum++) {
-                            
-                            size_t x = i_tile * 8 + i_sum;
-                            size_t y = j_tile * 8 + j_sum;
+                        
+                            float cos1 = dct[i_sum][i_tile];
+                            float cos2 = dct[j_sum][j_tile];
 
-                            float cos1 = std::cos(((2*x+1)*i_tile*pi)/16.0);
-                            float cos2 = std::cos(((2*y+1)*j_tile*pi)/16.0);
+                            size_t x = i_block * 8 + i_sum;
+                            size_t y = j_block * 8 + j_sum;
 
                             sum += (inputData[y * width + x] * cos1 * cos2);
                         }
@@ -188,39 +197,10 @@ int main(int argc, char **argv) {
     wbArg_t args = wbArg_read(argc, argv);
 
     Compressor compressor(args);
-    // compressor.sequential_compress();
+    compressor.sequential_compress();
     // compressor.parallel_compress();
 
-    float in[64]   = { 255, 255, 255, 255, 255, 255, 255, 255, 
-                       255, 255, 255, 255, 255, 255, 255, 255, 
-                       255, 255, 255, 255, 255, 255, 255, 255, 
-                       255, 255, 255, 255, 255, 255, 255, 255, 
-                       255, 255, 255, 255, 255, 255, 255, 255, 
-                       255, 255, 255, 255, 255, 255, 255, 255, 
-                       255, 255, 255, 255, 255, 255, 255, 255, 
-                       255, 255, 255, 255, 255, 255, 255, 255 };
-
-    float out[64];
-
-    compressor.sequential_dct(in, out, 8, 8);
-
-    for (int i = 0; i < 8; i++) {
-        for (int j = 0; j < 8; j++) {
-            printf("%0.6f\t", out[j*8+i]);
-        }
-        printf("\n");
-    }
-
-    // Should match:
-
-    // 2039.999878    -1.168211    1.190998    -1.230618    1.289227    -1.370580    1.480267    -1.626942    
-    // -1.167731       0.000664    -0.000694    0.000698    -0.000748    0.000774    -0.000837    0.000920    
-    // 1.191004       -0.000694    0.000710    -0.000710    0.000751    -0.000801    0.000864    -0.000950    
-    // -1.230645       0.000687    -0.000721    0.000744    -0.000771    0.000837    -0.000891    0.000975    
-    // 1.289146       -0.000751    0.000740    -0.000767    0.000824    -0.000864    0.000946    -0.001026    
-    // -1.370624       0.000744    -0.000820    0.000834    -0.000858    0.000898    -0.000998    0.001093    
-    // 1.480278       -0.000856    0.000870    -0.000895    0.000944    -0.001000    0.001080    -0.001177    
-    // -1.626932       0.000933    -0.000940    0.000975    -0.001024    0.001089    -0.001175    0.001298
+    printf("Done!");
 
     return 0;
 }
