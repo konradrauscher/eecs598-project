@@ -9,7 +9,7 @@ par_test:
 par: par_build par_test
 
 seq_build:
-	g++ -std=gnu++0x -Wall -Werror -I sequential sequential/main.cpp sequential/toojpeg.cpp -o sequential.out
+	g++ -std=gnu++0x -O3 -Wall -Werror -I sequential sequential/main.cpp sequential/toojpeg.cpp -o sequential.out
 
 seq_test:
 	./sequential.out test/0/input.ppm test/0/output.jpg
