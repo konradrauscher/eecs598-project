@@ -1,6 +1,6 @@
 #include <wb.h>
 
-#define pi 3.142857f
+#define pi 3.142857f 
 #define sqrt_2 0.707106781f
 
 __global__ void kernel_float_to_char(float* input, unsigned char* output, uint num) {
@@ -22,7 +22,16 @@ private:
     wbImage_t inputImage;
     const char *inputImageFile;
     float *hostInputImageData;
-    float dct[8][8];
+    const float dct[8][8] = {
+        { 1.00000000,  0.98076987,  0.92381907,  0.83133787,  0.70688325,  0.55524170,  0.38224527,  0.19454771 },	
+        { 1.00000000,  0.83133787,  0.38224527, -0.19578782, -0.70777708, -0.98101586, -0.92333424, -0.55418950 },
+        { 1.00000000,  0.55524170, -0.38341337, -0.98101586, -0.70598841,  0.19702761,  0.92478424,  0.82992971 },
+        { 1.00000000,  0.19454771, -0.92430240, -0.55418950,  0.70866978,  0.82992971, -0.38574794, -0.98002243 },
+        { 1.00000000, -0.19578782, -0.92333424,  0.55734301,  0.70509231, -0.83344024, -0.37873754,  0.98174447 },
+        { 1.00000000, -0.55629271, -0.38107678,  0.98027313, -0.70956099, -0.19082600,  0.92187083, -0.83483505 },
+        { 1.00000000, -0.83204001,  0.38458106,  0.19206657, -0.70419478,  0.97977030, -0.92622089,  0.56153554 },
+        { 1.00000000, -0.98101586,  0.92478424, -0.83344024,  0.71045172, -0.56048846,  0.38924527, -0.20322227 }
+    };
     const uint8_t Q_l[8][8] = {
         { 16, 11, 10, 16, 24, 40, 51, 61 },
         { 12, 12, 14, 19, 26, 58, 60, 55 },
@@ -32,7 +41,7 @@ private:
         { 24, 35, 55, 64, 81,104,113, 92 },
         { 49, 64, 78, 87,103,121,120,101 },
         { 72, 92, 95, 98,112,100,103, 99 }
-    }
+    };
     const uint8_t Q_c[8][8] = {
         { 17, 18, 24, 47, 99, 99, 99, 99 },
         { 18, 21, 26, 66, 99, 99, 99, 99 },
@@ -76,14 +85,6 @@ Compressor::Compressor(wbArg_t args) {
     wbTime_stop(Generic, "Importing data and creating memory on host");
 
     printf("Input image size: %4dx%4dx%1d\n", imageWidth, imageHeight, imageChannels);
-
-    wbTime_start(Generic, "Generating Discrete Cosine Transform lookup");
-    for (size_t i = 0; i < 8; i++) {
-        for (size_t j = 0; j < 8; j++) {
-            dct[i][j] = std::cos(((2*i+1)*j*pi)/16.0);
-        }
-    }
-    wbTime_stop(Generic, "Generating Discrete Cosine Transform lookup");
 }
 
 Compressor::~Compressor() {
