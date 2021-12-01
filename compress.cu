@@ -1,5 +1,6 @@
 #include <wb.h>
-#include <vector>
+#include <memory>
+#include <fstream>
 
 #define pi 3.14159265f
 #define sqrt1_2 0.707106781f
@@ -419,7 +420,10 @@ void Compressor::sequential_compress() {
     size_t numPix = imageWidth*imageHeight;
 
     // convert from RGB floats to YCbCr in separate channels
-    std::vector<float> YData(numPix), CbData(numPix), CrData(numPix);
+    std::unique_ptr<float[]> 
+        YData(new float[numPix]), 
+        CbData(new float[numPix]),
+        CrData(new float[numPix]);
 
     for (size_t i = 0; i < imageWidth*imageHeight; i++) {
 
@@ -435,14 +439,20 @@ void Compressor::sequential_compress() {
     // TODO: subsample chrominance using 4:2:0 subsampling
 
     // discrete cosine transform
-    std::vector<float> YDctData(numPix), CbDctData(numPix), CrDctData(numPix);
+    std::unique_ptr<float[]>
+        YDctData(new float[numPix]),
+        CbDctData(new float[numPix]),
+        CrDctData(new float[numPix]);
 
-    sequential_dct(YData.data(),  YDctData.data(),  imageWidth, imageHeight);
-    sequential_dct(CbData.data(), CbDctData.data(), imageWidth, imageHeight);
-    sequential_dct(CrData.data(), CrDctData.data(), imageWidth, imageHeight);
+    sequential_dct(YData.get(),  YDctData.get(),  imageWidth, imageHeight);
+    sequential_dct(CbData.get(), CbDctData.get(), imageWidth, imageHeight);
+    sequential_dct(CrData.get(), CrDctData.get(), imageWidth, imageHeight);
 
     // quantization
-    std::vector<unsigned char> YQData(numPix), CbQData(numPix), CrQData(numPix);
+    std::unique_ptr<uint8_t[]> 
+        YQData(new uint8_t[numPix]), 
+        CbQData(new uint8_t[numPix]), 
+        CrQData(new uint8_t[numPix]);
 
     for (size_t j_block = 0; j_block < imageHeight/8; j_block++) {
         for (size_t i_block = 0; i_block < imageWidth/8; i_block++) {
@@ -452,16 +462,19 @@ void Compressor::sequential_compress() {
                     size_t i = i_block * 8 + i_tile;
                     size_t j = j_block * 8 + j_tile;
 
-                    YQData [j * imageWidth + i] = (unsigned char) round(YDctData [j * imageWidth + i] / Q_l[j_tile][i_tile]);
-                    CbQData[j * imageWidth + i] = (unsigned char) round(CbDctData[j * imageWidth + i] / Q_c[j_tile][i_tile]);
-                    CrQData[j * imageWidth + i] = (unsigned char) round(CrDctData[j * imageWidth + i] / Q_c[j_tile][i_tile]);   
+                    YQData [j * imageWidth + i] = (uint8_t) round(YDctData [j * imageWidth + i] / Q_l[j_tile][i_tile]);
+                    CbQData[j * imageWidth + i] = (uint8_t) round(CbDctData[j * imageWidth + i] / Q_c[j_tile][i_tile]);
+                    CrQData[j * imageWidth + i] = (uint8_t) round(CrDctData[j * imageWidth + i] / Q_c[j_tile][i_tile]);   
                 }
             }
         }
     }
 
     // zigzag rearrange
-    std::vector<unsigned char> YRearrangedData(numPix), CbRearrangedData(numPix), CrRearrangedData(numPix);
+    std::unique_ptr<uint8_t[]> 
+        YRearrangedData(new uint8_t[numPix]),
+        CbRearrangedData(new uint8_t[numPix]),
+        CrRearrangedData(new uint8_t[numPix]);
 
     for (size_t j_block = 0; j_block < imageHeight/8; j_block++) {
         for (size_t i_block = 0; i_block < imageWidth/8; i_block++) {
@@ -610,22 +623,21 @@ void Compressor::rgb_to_ycbcr(unsigned char* hostCharData, unsigned char* hostYC
     wbTime_stop(Generic, "Converting image from float to unsigned char");
 }
 
-FILE* outputImage;
-void write_one_byte(unsigned char byte) { fputc(byte, outputImage); };
+std::ofstream outputFile;
+void write_one_byte(unsigned char byte) { outputFile << byte; };
 
 int main(int argc, char **argv) {
 
     wbArg_t args = wbArg_read(argc, argv);
+    
+    outputFile.open(wbArg_getOutputFile(args), std::ios_base::binary);
 
-    outputImage = fopen(wbArg_getOutputFile(args), "wb");
-    if (!outputImage) ERROR("Unable to open output image");
+    if (!outputFile.is_open()) ERROR("Opening output file failed");
 
-    Compressor compressor(args, &write_one_byte);
+    Compressor compressor(args, write_one_byte);
 
     compressor.sequential_compress();
     // compressor.parallel_compress();
-
-    fclose(outputImage);
 
     printf("Done!\n");
 
