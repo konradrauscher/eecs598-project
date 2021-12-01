@@ -55,7 +55,9 @@ __global__ void kernel_block_dct(const float* inputData, float* outputData, cons
 
     size_t i = i_block * 8 + i_tile; // overall i index in image
     size_t j = j_block * 8 + j_tile; // overall j index in image
-
+    
+    if (i >= width || j >= height) return;
+    
     float c_i = (i_tile == 0) ? sqrt1_2 : 1.0f;
     float c_j = (j_tile == 0) ? sqrt1_2 : 1.0f;
 
