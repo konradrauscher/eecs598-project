@@ -720,7 +720,7 @@ void Compressor::parallel_compress() {
 
     size_t numPix = imageWidth * imageHeight;
     size_t numEl = numPix * imageChannels;
-    size_t numBlocks = numPix / 64;
+    //size_t numBlocks = numPix / 64;
 
     DevicePtr<float> deviceRGBImageData(numEl);
     DevicePtr<float> deviceYCbCrImageData(numEl);
@@ -842,6 +842,13 @@ void write_one_byte(unsigned char byte) { outputData.push_back(byte); };
 
 int main(int argc, char **argv) {
 
+    //To run in parallel, put --parallel at the END of the command line arguments
+    bool parallel = false;
+    if (!strcmp(argv[argc - 1], "--parallel")) {
+        parallel = true;
+        argc -= 1;
+    }
+
     wbArg_t args = wbArg_read(argc, argv);
 
     std::ofstream outputFile;
@@ -854,8 +861,12 @@ int main(int argc, char **argv) {
     // Reserve enough in output buffer for very high-quality compression to avoid reallocation
     outputData.reserve(compressor.getNumPixels() / 4);
 
-    compressor.sequential_compress();
-    // compressor.parallel_compress();
+    if (parallel) {
+        compressor.parallel_compress();
+    }
+    else {
+        compressor.sequential_compress();
+    }
 
     outputFile.write((const char*)outputData.data(), outputData.size());
 
