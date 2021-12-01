@@ -109,9 +109,7 @@ __global__ void kernel_zigzag(const uint8_t* inputData, uint8_t* outputData, con
 }
 
 
-// Call with a single (square) block so it's possible to synchronize
-// Scratch needs to be big enough to temporarily hold the result for each block
-template<uint BLOCK_DIM>
+// Input data is an image, output data is length num_jpeg_blocks and encodes the DC offset for each block
 __global__ void kernel_subtract_dc_values(const uint8_t* inputData, int8_t* diffs, uint width, uint height) {
     uint tx = threadIdx.x, ty = threadIdx.y;
 
@@ -121,8 +119,8 @@ __global__ void kernel_subtract_dc_values(const uint8_t* inputData, int8_t* diff
     uint numBlocksY = height / 8;
 
     // I think i and j might be switched here from what they are in the rest of the code
-    for(uint ii = tx; ii < numBlocksY; ii += BLOCK_DIM){
-        for (uint jj = ty; jj < numBlocksX; jj += BLOCK_DIM) {
+    for(uint ii = tx; ii < numBlocksY; ii += blockDim.y){
+        for (uint jj = ty; jj < numBlocksX; jj += blockDim.x) {
 
             if (ii == 0 && jj == 0) {
                 diffs[0] = 0;
@@ -706,9 +704,9 @@ void Compressor::parallel_compress() {
     int8_t* dcCb = dcY + numBlocks;
     int8_t* dcCr = dcCb + numBlocks;
 
-    kernel_subtract_dc_values<16> << <DimGrid3, DimBlock3 >> > (deviceYQuant, dcY, imageWidth, imageHeight);
-    kernel_subtract_dc_values<16> << <DimGrid3, DimBlock3 >> > (deviceCbQuant, dcCb, imageWidth, imageHeight);
-    kernel_subtract_dc_values<16> << <DimGrid3, DimBlock3 >> > (deviceCrQuant, dcCr, imageWidth, imageHeight);
+    kernel_subtract_dc_values << <DimGrid3, DimBlock3 >> > (deviceYQuant, dcY, imageWidth, imageHeight);
+    kernel_subtract_dc_values << <DimGrid3, DimBlock3 >> > (deviceCbQuant, dcCb, imageWidth, imageHeight);
+    kernel_subtract_dc_values << <DimGrid3, DimBlock3 >> > (deviceCrQuant, dcCr, imageWidth, imageHeight);
 
     wbCheck(cudaDeviceSynchronize());
 
