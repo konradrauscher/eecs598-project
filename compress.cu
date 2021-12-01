@@ -94,24 +94,24 @@ __global__ void kernel_quantize_dct_output(const float* inputData, uint8_t* outp
     outputData[j * width + i] = (uint8_t) round(inputData[j * width + i] / Q[j_tile*8 + i_tile]);
 }
 
-__global__ void kernel_zigzag(const uint8_t* inputData, uint8_t* outputData, const uint8_t* zigzag, uint width, uint height) {
+__global__ void kernel_zigzag(const uint8_t* inputData, uint8_t* outputData, const uint8_t* zigzag_map, uint width, uint height) {
     assert(blockDim.x == 8);
     assert(blockDim.y == 8);
 
     uint j_block = blockIdx.y, i_block = blockIdx.x;
     uint j_tile = threadIdx.y, i_tile = threadIdx.x;
-    size_t block_num = j_block * imageWidth / 8 + i_block;
+    size_t block_num = j_block * width / 8 + i_block;
     size_t tile_num = j_tile * 8 + i_tile;
     size_t x = i_block * 8 + i_tile;
     size_t y = j_block * 8 + j_tile;
 
-    outputData[block_num * 64 + zigzag_map[tile_num]] = inputData[y * imageWidth + x];
+    outputData[block_num * 64 + zigzag_map[tile_num]] = inputData[y * width + x];
 }
 
 
 // Call with a single (square) block so it's possible to synchronize
 // Scratch needs to be big enough to temporarily hold the result for each block
-template<uint BLOCK_SIZE>
+template<uint BLOCK_DIM>
 __global__ void kernel_subtract_dc_values(const uint8_t* inputData, int8_t* diffs, uint width, uint height) {
     uint tx = threadIdx.x, ty = threadIdx.y;
 
@@ -121,11 +121,11 @@ __global__ void kernel_subtract_dc_values(const uint8_t* inputData, int8_t* diff
     uint numBlocksY = height / 8;
 
     // I think i and j might be switched here from what they are in the rest of the code
-    for(uint ii = 0; ii < numBlocksY; ii += BLOCK_DIM){
-        for (uint jj = 0; jj < numBlocksX; jj += BLOCK_DIM) {
+    for(uint ii = tx; ii < numBlocksY; ii += BLOCK_DIM){
+        for (uint jj = ty; jj < numBlocksX; jj += BLOCK_DIM) {
 
             if (ii == 0 && jj == 0) {
-                scratch[0] = 0;
+                diffs[0] = 0;
                 continue;
             }
 
@@ -139,7 +139,7 @@ __global__ void kernel_subtract_dc_values(const uint8_t* inputData, int8_t* diff
             uint8_t prev_dc = inputData[ii_prev * 8 * width + jj_prev * 8];
 
             // I believe the wraparound should work correctly here?
-            scratch[ii * numBlocksX + jj] = curr_dc - prev_dc;
+            diffs[ii * numBlocksX + jj] = curr_dc - prev_dc;
         }
     }
 }
@@ -693,22 +693,22 @@ void Compressor::parallel_compress() {
     uint8_t* deviceCbZigzag = deviceYZigzag + numPix;
     uint8_t* deviceCrZigzag = deviceCbZigzag + numPix;
 
-    kernel_quantize_dct_output << <DimGrid2, DimBlock2 >> > (deviceYQuant,  deviceYZigzag,  zigzag_map_device.get(), imageWidth, imageHeight);
-    kernel_quantize_dct_output << <DimGrid2, DimBlock2 >> > (deviceCbQuant, deviceCbZigzag, zigzag_map_device.get(), imageWidth, imageHeight);
-    kernel_quantize_dct_output << <DimGrid2, DimBlock2 >> > (deviceCrQuant, deviceCrZigzag, zigzag_map_device.get(), imageWidth, imageHeight);
+    kernel_zigzag << <DimGrid2, DimBlock2 >> > (deviceYQuant,  deviceYZigzag,  zigzag_map_device.get(), imageWidth, imageHeight);
+    kernel_zigzag << <DimGrid2, DimBlock2 >> > (deviceCbQuant, deviceCbZigzag, zigzag_map_device.get(), imageWidth, imageHeight);
+    kernel_zigzag << <DimGrid2, DimBlock2 >> > (deviceCrQuant, deviceCrZigzag, zigzag_map_device.get(), imageWidth, imageHeight);
 
     //Note that this and the next kernel can be done independently of each other
 
     dim3 DimGrid3((imageHeight - 1) / (8*16) + 1, (imageWidth - 1) / (8*16) + 1, 1);
     dim3 DimBlock3(16, 16, 1);
 
-    uint8_t* dcY = deviceZigzagData.get();
-    uint8_t* dcCb = dcY + numBlocks;
-    uint8_t* dcCr = dcCb + numBlocks;
+    int8_t* dcY = deviceDcCoeffDiffs.get();
+    int8_t* dcCb = dcY + numBlocks;
+    int8_t* dcCr = dcCb + numBlocks;
 
-    kernel_subtract_dc_values<< <DimGrid3, DimBlock3 >> > (deviceYQuant, dcY, imageWidth, imageHeight);
-    kernel_subtract_dc_values << <DimGrid3, DimBlock3 >> > (deviceCbQuant, dcCb, imageWidth, imageHeight);
-    kernel_subtract_dc_values << <DimGrid3, DimBlock3 >> > (deviceCrQuant, dcCr, imageWidth, imageHeight);
+    kernel_subtract_dc_values<16> << <DimGrid3, DimBlock3 >> > (deviceYQuant, dcY, imageWidth, imageHeight);
+    kernel_subtract_dc_values<16> << <DimGrid3, DimBlock3 >> > (deviceCbQuant, dcCb, imageWidth, imageHeight);
+    kernel_subtract_dc_values<16> << <DimGrid3, DimBlock3 >> > (deviceCrQuant, dcCr, imageWidth, imageHeight);
 
     wbCheck(cudaDeviceSynchronize());
 
