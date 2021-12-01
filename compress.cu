@@ -78,6 +78,7 @@ __global__ void kernel_block_dct(const float* inputData, float* outputData, cons
     outputData[j * width + i] = 0.25 * c_i * c_j * sum;
 }
 
+
 //Call this once for each channel
 __global__ void kernel_quantize_dct_output(const float* inputData, uint8_t* outputData, const uint8_t* Q, uint width, uint height)
 {
@@ -93,6 +94,55 @@ __global__ void kernel_quantize_dct_output(const float* inputData, uint8_t* outp
     outputData[j * width + i] = (uint8_t) round(inputData[j * width + i] / Q[j_tile*8 + i_tile]);
 }
 
+__global__ void kernel_zigzag(const uint8_t* inputData, uint8_t* outputData, const uint8_t* zigzag, uint width, uint height) {
+    assert(blockDim.x == 8);
+    assert(blockDim.y == 8);
+
+    uint j_block = blockIdx.y, i_block = blockIdx.x;
+    uint j_tile = threadIdx.y, i_tile = threadIdx.x;
+    size_t block_num = j_block * imageWidth / 8 + i_block;
+    size_t tile_num = j_tile * 8 + i_tile;
+    size_t x = i_block * 8 + i_tile;
+    size_t y = j_block * 8 + j_tile;
+
+    outputData[block_num * 64 + zigzag_map[tile_num]] = inputData[y * imageWidth + x];
+}
+
+
+// Call with a single (square) block so it's possible to synchronize
+// Scratch needs to be big enough to temporarily hold the result for each block
+template<uint BLOCK_SIZE>
+__global__ void kernel_subtract_dc_values(const uint8_t* inputData, int8_t* diffs, uint width, uint height) {
+    uint tx = threadIdx.x, ty = threadIdx.y;
+
+    
+    //TODO - MAY NEED TO CHANGE FOR PARTIAL BLOCKS
+    uint numBlocksX = width / 8;
+    uint numBlocksY = height / 8;
+
+    // I think i and j might be switched here from what they are in the rest of the code
+    for(uint ii = 0; ii < numBlocksY; ii += BLOCK_DIM){
+        for (uint jj = 0; jj < numBlocksX; jj += BLOCK_DIM) {
+
+            if (ii == 0 && jj == 0) {
+                scratch[0] = 0;
+                continue;
+            }
+
+            //ii and jj are indices of current JPEG block
+            
+            //indices of previous JPEG block
+            uint ii_prev = (jj == 0) ? (ii - 1) : ii;
+            uint jj_prev = (jj == 0) ? (numBlocksY - 1) : jj - 1;
+
+            uint8_t curr_dc = inputData[ii * 8 * width + jj * 8];
+            uint8_t prev_dc = inputData[ii_prev * 8 * width + jj_prev * 8];
+
+            // I believe the wraparound should work correctly here?
+            scratch[ii * numBlocksX + jj] = curr_dc - prev_dc;
+        }
+    }
+}
 
 template<typename T>
 class DevicePtr{
@@ -298,6 +348,8 @@ private:
     };
 
     // Huffman tables (from https://github.com/nothings/stb/blob/master/stb_image_write.h)
+    // TODO: why were these allocated with space for 256 elements but have much fewer than that??
+    // TBH we may just want to copy the toojpeg implementation
     const BitCode YDC_HT[256] = { {0,2},{2,3},{3,3},{4,3},{5,3},{6,3},{14,4},{30,5},{62,6},{126,7},{254,8},{510,9} };
     const BitCode UVDC_HT[256] = { {0,2},{1,2},{2,2},{6,3},{14,4},{30,5},{62,6},{126,7},{254,8},{510,9},{1022,10},{2046,11} };
     const BitCode YAC_HT[256] = {
@@ -594,11 +646,14 @@ void Compressor::parallel_compress() {
 
     size_t numPix = imageWidth * imageHeight;
     size_t numEl = numPix * imageChannels;
+    size_t numBlocks = numPix / 64;
 
     DevicePtr<float> deviceRGBImageData(numEl);
     DevicePtr<float> deviceYCbCrImageData(numEl);
     DevicePtr<float> deviceDCTData(numEl);
     DevicePtr<uint8_t> deviceQuantData(numEl);
+    DevicePtr<uint8_t> deviceZigzagData(numEl);
+    DevicePtr<int8_t> deviceDcCoeffDiffs(numBlocks * 3);
 
     dim3 DimGrid1((imageWidth*imageHeight*imageChannels-1)/1024 + 1, 1, 1);
     dim3 DimBlock1(1024, 1, 1);
@@ -631,6 +686,29 @@ void Compressor::parallel_compress() {
     kernel_quantize_dct_output<<<DimGrid2, DimBlock2>>>(deviceYDCT,  deviceYQuant,  Q_l_device.get(), imageWidth, imageHeight);
     kernel_quantize_dct_output<<<DimGrid2, DimBlock2>>>(deviceCbDCT, deviceCbQuant, Q_c_device.get(), imageWidth, imageHeight);
     kernel_quantize_dct_output<<<DimGrid2, DimBlock2>>>(deviceCrDCT, deviceCrQuant, Q_c_device.get(), imageWidth, imageHeight);
+
+    wbCheck(cudaDeviceSynchronize());
+
+    uint8_t* deviceYZigzag = deviceZigzagData.get();
+    uint8_t* deviceCbZigzag = deviceYZigzag + numPix;
+    uint8_t* deviceCrZigzag = deviceCbZigzag + numPix;
+
+    kernel_quantize_dct_output << <DimGrid2, DimBlock2 >> > (deviceYQuant,  deviceYZigzag,  zigzag_map_device.get(), imageWidth, imageHeight);
+    kernel_quantize_dct_output << <DimGrid2, DimBlock2 >> > (deviceCbQuant, deviceCbZigzag, zigzag_map_device.get(), imageWidth, imageHeight);
+    kernel_quantize_dct_output << <DimGrid2, DimBlock2 >> > (deviceCrQuant, deviceCrZigzag, zigzag_map_device.get(), imageWidth, imageHeight);
+
+    //Note that this and the next kernel can be done independently of each other
+
+    dim3 DimGrid3((imageHeight - 1) / (8*16) + 1, (imageWidth - 1) / (8*16) + 1, 1);
+    dim3 DimBlock3(16, 16, 1);
+
+    uint8_t* dcY = deviceZigzagData.get();
+    uint8_t* dcCb = dcY + numBlocks;
+    uint8_t* dcCr = dcCb + numBlocks;
+
+    kernel_subtract_dc_values<< <DimGrid3, DimBlock3 >> > (deviceYQuant, dcY, imageWidth, imageHeight);
+    kernel_subtract_dc_values << <DimGrid3, DimBlock3 >> > (deviceCbQuant, dcCb, imageWidth, imageHeight);
+    kernel_subtract_dc_values << <DimGrid3, DimBlock3 >> > (deviceCrQuant, dcCr, imageWidth, imageHeight);
 
     wbCheck(cudaDeviceSynchronize());
 
