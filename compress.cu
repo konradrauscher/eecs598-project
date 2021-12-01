@@ -80,7 +80,7 @@ __global__ void kernel_block_dct(const float* inputData, float* outputData, cons
 
 
 //Call this once for each channel
-__global__ void kernel_quantize_dct_output(const float* inputData, uint8_t* outputData, const uint8_t* Q, uint width, uint height)
+__global__ void kernel_quantize_dct_output(const float* inputData, int16_t* outputData, const uint8_t* Q, uint width, uint height)
 {
     assert(blockDim.x == 8);
     assert(blockDim.y == 8);
@@ -91,10 +91,10 @@ __global__ void kernel_quantize_dct_output(const float* inputData, uint8_t* outp
     size_t i = i_block * 8 + i_tile;
     size_t j = j_block * 8 + j_tile;
 
-    outputData[j * width + i] = (uint8_t) round(inputData[j * width + i] / Q[j_tile*8 + i_tile]);
+    outputData[j * width + i] = (int16_t) round(inputData[j * width + i] / Q[j_tile*8 + i_tile]);
 }
 
-__global__ void kernel_zigzag(const uint8_t* inputData, uint8_t* outputData, const uint8_t* zigzag_map, uint width, uint height) {
+__global__ void kernel_zigzag(const int16_t* inputData, int16_t* outputData, const uint8_t* zigzag_map, uint width, uint height) {
     assert(blockDim.x == 8);
     assert(blockDim.y == 8);
 
@@ -110,7 +110,7 @@ __global__ void kernel_zigzag(const uint8_t* inputData, uint8_t* outputData, con
 
 
 // Input data is an image, output data is length num_jpeg_blocks and encodes the DC offset for each block
-__global__ void kernel_subtract_dc_values(const uint8_t* inputData, int8_t* diffs, uint width, uint height) {
+__global__ void kernel_subtract_dc_values(const int16_t* inputData, int16_t* diffs, uint width, uint height) {
     uint tx = threadIdx.x, ty = threadIdx.y;
 
     
@@ -136,7 +136,6 @@ __global__ void kernel_subtract_dc_values(const uint8_t* inputData, int8_t* diff
             uint8_t curr_dc = inputData[ii * 8 * width + jj * 8];
             uint8_t prev_dc = inputData[ii_prev * 8 * width + jj_prev * 8];
 
-            // I believe the wraparound should work correctly here?
             diffs[ii * numBlocksX + jj] = curr_dc - prev_dc;
         }
     }
@@ -723,9 +722,9 @@ void Compressor::parallel_compress() {
     DevicePtr<float> deviceRGBImageData(numEl);
     DevicePtr<float> deviceYCbCrImageData(numEl);
     DevicePtr<float> deviceDCTData(numEl);
-    DevicePtr<uint8_t> deviceQuantData(numEl);
-    DevicePtr<uint8_t> deviceZigzagData(numEl);
-    DevicePtr<int8_t> deviceDcCoeffDiffs(numBlocks * 3);
+    DevicePtr<int16_t> deviceQuantData(numEl);
+    DevicePtr<int16_t> deviceZigzagData(numEl);
+    DevicePtr<int16_t> deviceDcCoeffDiffs(numBlocks * 3);
 
     dim3 DimGrid1((imageWidth*imageHeight*imageChannels-1)/1024 + 1, 1, 1);
     dim3 DimBlock1(1024, 1, 1);
@@ -751,9 +750,9 @@ void Compressor::parallel_compress() {
 
     wbCheck(cudaDeviceSynchronize());
 
-    uint8_t* deviceYQuant = deviceQuantData.get();
-    uint8_t* deviceCbQuant = deviceYQuant + numPix;
-    uint8_t* deviceCrQuant = deviceCbQuant + numPix;
+    int16_t* deviceYQuant = deviceQuantData.get();
+    int16_t* deviceCbQuant = deviceYQuant + numPix;
+    int16_t* deviceCrQuant = deviceCbQuant + numPix;
 
     kernel_quantize_dct_output<<<DimGrid2, DimBlock2>>>(deviceYDCT,  deviceYQuant,  Q_l_device.get(), imageWidth, imageHeight);
     kernel_quantize_dct_output<<<DimGrid2, DimBlock2>>>(deviceCbDCT, deviceCbQuant, Q_c_device.get(), imageWidth, imageHeight);
@@ -761,9 +760,9 @@ void Compressor::parallel_compress() {
 
     wbCheck(cudaDeviceSynchronize());
 
-    uint8_t* deviceYZigzag = deviceZigzagData.get();
-    uint8_t* deviceCbZigzag = deviceYZigzag + numPix;
-    uint8_t* deviceCrZigzag = deviceCbZigzag + numPix;
+    int16_t* deviceYZigzag = deviceZigzagData.get();
+    int16_t* deviceCbZigzag = deviceYZigzag + numPix;
+    int16_t* deviceCrZigzag = deviceCbZigzag + numPix;
 
     kernel_zigzag << <DimGrid2, DimBlock2 >> > (deviceYQuant,  deviceYZigzag,  zigzag_map_device.get(), imageWidth, imageHeight);
     kernel_zigzag << <DimGrid2, DimBlock2 >> > (deviceCbQuant, deviceCbZigzag, zigzag_map_device.get(), imageWidth, imageHeight);
@@ -774,9 +773,9 @@ void Compressor::parallel_compress() {
     dim3 DimGrid3((imageHeight - 1) / (8*16) + 1, (imageWidth - 1) / (8*16) + 1, 1);
     dim3 DimBlock3(16, 16, 1);
 
-    int8_t* dcY = deviceDcCoeffDiffs.get();
-    int8_t* dcCb = dcY + numBlocks;
-    int8_t* dcCr = dcCb + numBlocks;
+    int16_t* dcY = deviceDcCoeffDiffs.get();
+    int16_t* dcCb = dcY + numBlocks;
+    int16_t* dcCr = dcCb + numBlocks;
 
     kernel_subtract_dc_values << <DimGrid3, DimBlock3 >> > (deviceYQuant, dcY, imageWidth, imageHeight);
     kernel_subtract_dc_values << <DimGrid3, DimBlock3 >> > (deviceCbQuant, dcCb, imageWidth, imageHeight);
