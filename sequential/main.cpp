@@ -27,7 +27,7 @@ int main(int argc, char** argv) {
 
     if (!outfile) ERROR("Unable to open output image");
 
-    bool ok = TooJpeg::writeJpeg(&write_one_byte, data, width, height, num_components != 1, 90, false, "EECS598 Project Output");
+    bool ok = TooJpeg::writeJpeg(&write_one_byte, data, width, height, num_components != 1, 50, false, "EECS598 Project Output");
 
     if (!ok) ERROR("Error writing JPEG");
 
