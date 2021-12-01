@@ -4,6 +4,8 @@
 #define pi 3.14159265f
 #define sqrt1_2 0.707106781f
 
+#define ERROR(MSG) {fprintf(stderr, MSG "\n"); exit(1);}
+
 #define wbCheck(stmt)                                                     \
   do {                                                                    \
     cudaError_t err = stmt;                                               \
@@ -128,13 +130,100 @@ public:
     }
 };
 
+// represent a single Huffman code
+struct BitCode
+{
+  BitCode() = default; // undefined state, must be initialized at a later time
+  BitCode(uint16_t code_, uint8_t numBits_)
+  : code(code_), numBits(numBits_) {}
+  uint16_t code;       // JPEG's Huffman codes are limited to 16 bits
+  uint8_t  numBits;    // number of valid bits
+};
+
+typedef void (*WRITE_ONE_BYTE)(unsigned char);
+
+// wrapper for bit output operations
+struct BitWriter
+{
+  // user-supplied callback that writes/stores one byte
+  WRITE_ONE_BYTE output;
+  // initialize writer
+  explicit BitWriter(WRITE_ONE_BYTE output_) : output(output_) {}
+
+  // store the most recently encoded bits that are not written yet
+  struct BitBuffer
+  {
+    int32_t data    = 0; // actually only at most 24 bits are used
+    uint8_t numBits = 0; // number of valid bits (the right-most bits)
+  } buffer;
+
+  // write Huffman bits stored in BitCode, keep excess bits in BitBuffer
+  BitWriter& operator<<(const BitCode& data)
+  {
+    // append the new bits to those bits leftover from previous call(s)
+    buffer.numBits += data.numBits;
+    buffer.data   <<= data.numBits;
+    buffer.data    |= data.code;
+
+    // write all "full" bytes
+    while (buffer.numBits >= 8)
+    {
+      // extract highest 8 bits
+      buffer.numBits -= 8;
+      auto oneByte = uint8_t(buffer.data >> buffer.numBits);
+      output(oneByte);
+
+      if (oneByte == 0xFF) // 0xFF has a special meaning for JPEGs (it's a block marker)
+        output(0);         // therefore pad a zero to indicate "nope, this one ain't a marker, it's just a coincidence"
+
+      // note: I don't clear those written bits, therefore buffer.bits may contain garbage in the high bits
+      //       if you really want to "clean up" (e.g. for debugging purposes) then uncomment the following line
+      //buffer.bits &= (1 << buffer.numBits) - 1;
+    }
+    return *this;
+  }
+
+  // write all non-yet-written bits, fill gaps with 1s (that's a strange JPEG thing)
+  void flush()
+  {
+    // at most seven set bits needed to "fill" the last byte: 0x7F = binary 0111 1111
+    *this << BitCode(0x7F, 7); // I should set buffer.numBits = 0 but since there are no single bits written after flush() I can safely ignore it
+  }
+
+  // NOTE: all the following BitWriter functions IGNORE the BitBuffer and write straight to output !
+  // write a single byte
+  BitWriter& operator<<(uint8_t oneByte)
+  {
+    output(oneByte);
+    return *this;
+  }
+
+  // write an array of bytes
+  template <typename T, int Size>
+  BitWriter& operator<<(T (&manyBytes)[Size])
+  {
+    for (auto c : manyBytes)
+      output(c);
+    return *this;
+  }
+
+  // start a new JFIF block
+  void addMarker(uint8_t id, uint16_t length)
+  {
+    output(0xFF); output(id);     // ID, always preceded by 0xFF
+    output(uint8_t(length >> 8)); // length of the block (big-endian, includes the 2 length bytes as well)
+    output(uint8_t(length & 0xFF));
+  }
+};
+
 class Compressor {
 private:
-    int imageWidth;
-    int imageHeight;
-    int imageChannels;
-    wbImage_t inputImage;
     const char* inputImageFile;
+    wbImage_t inputImage;
+    BitWriter bitWriter;
+    uint16_t imageWidth;
+    uint16_t imageHeight;
+    uint8_t imageChannels;
     float* hostInputImageData;
     // Discrete cosine transform lookup: cos((2i+1)jpi/16) = dct[i][j]
     const float dct[8][8] = {
@@ -215,16 +304,18 @@ private:
     void float_to_char(unsigned char* hostCharData);
     void rgb_to_ycbcr(unsigned char* hostCharData, unsigned char* hostYCbCrData);
     void sequential_dct(float* inputData, float* outputData, int width, int height);
+    void write_file();
 
 public:
-    Compressor(wbArg_t args);
+    Compressor(wbArg_t args, WRITE_ONE_BYTE _output);
     ~Compressor();
     void sequential_compress();
     void parallel_compress();
 };
 
-Compressor::Compressor(wbArg_t args): 
-    : dct_device(64)
+Compressor::Compressor(wbArg_t args, WRITE_ONE_BYTE _output)
+    : bitWriter(_output)
+    , dct_device(64)
     , Q_l_device(64)
     , Q_c_device(64)
     , zigzag_map_device(64)
@@ -243,14 +334,84 @@ Compressor::Compressor(wbArg_t args):
     wbCheck(cudaMemcpy(Q_c_device.get(), Q_c, sizeof(Q_c), cudaMemcpyHostToDevice));
     wbCheck(cudaMemcpy(zigzag_map_device.get(), zigzag_map, sizeof(zigzag_map), cudaMemcpyHostToDevice));
     
-
-
-
-    printf("Input image size: %4dx%4dx%1d\n", imageWidth, imageHeight, imageChannels);
+    printf("Input image size: %dx%dx%d\n", imageWidth, imageHeight, imageChannels);
 }
 
 Compressor::~Compressor() {
     wbImage_delete(inputImage);
+}
+
+void Compressor::write_file() {   
+
+    const uint8_t HeaderJfif[2+2+16] = { 
+        0xFF,0xD8,          // SOI marker (start of image)
+        0xFF,0xE0,          // JFIF APP0 tag
+        0,16,               // length: 16 bytes (14 bytes payload + 2 bytes for this length field)
+        'J','F','I','F',0,  // JFIF identifier, zero-terminated
+        1,1,                // JFIF version 1.1
+        0,                  // no density units specified
+        0,1,0,1,            // density: 1 pixel "per pixel" horizontally and vertically
+        0,0                 // no thumbnail (size 0 x 0) 
+    };   
+    const char comment[23] = "EECS598 Project Output";
+
+    // JFIF Header
+    bitWriter << HeaderJfif;
+
+    // Comment
+    bitWriter.addMarker(0xFE, 24);
+    for (auto i = 0; i < 22; i++) { 
+        bitWriter << comment[i];
+    }
+
+    // Quantization Tables
+    bitWriter.addMarker(0xDB, 2 + 2*(1 + 8*8));
+    bitWriter   << 0x00;
+    for (auto i = 0; i < 8; i++) {
+        bitWriter << Q_l[i];
+    }
+    bitWriter   << 0x01;
+    for (auto i = 0; i < 8; i++) {
+        bitWriter << Q_c[i];
+    }
+
+    // Bits/Pixel, Image Size, Number of Channels, and Subsampling and Y vs C for each channel
+    bitWriter.addMarker(0xC0, 2+6+3*3);
+    bitWriter   << 0x08 
+                << (imageHeight >> 8) << (imageHeight & 0xFF)
+                << (imageWidth  >> 8) << (imageWidth  & 0xFF)
+                << 0x03
+                << 0x01 << 0x11 << 0x00
+                << 0x02 << 0x11 << 0x01
+                << 0x03 << 0x11 << 0x01;
+
+    printf("0x%X 0x%X\n", imageHeight, imageWidth);
+
+    // Huffman Tables
+    bitWriter.addMarker(0xC4, 2+208+208);
+    bitWriter   << 0x00 << DcLuminanceCodesPerBitsize   << DcLuminanceValues
+                << 0x10 << AcLuminanceCodesPerBitsize   << AcLuminanceValues
+                << 0x01 << DcChrominanceCodesPerBitsize << DcChrominanceValues
+                << 0x11 << AcChrominanceCodesPerBitsize << AcChrominanceValues;
+
+    // Start of Scan
+    bitWriter.addMarker(0xDA, 2+1+2*3+3);
+
+    // Number of Channels and Channel map to Huffman Tables
+    bitWriter   << 0x03
+                << 0x01 << 0x00
+                << 0x02 << 0x11
+                << 0x03 << 0x11;
+
+    // Spectral Selection - Single Scan
+    bitWriter << 0x00 << 0x3F << 0x00;
+
+    // TODO: Image Data
+
+    // End of Image
+    bitWriter << 0xFF << 0xD9;
+
+    bitWriter.flush();
 }
 
 void Compressor::sequential_compress() {
@@ -299,7 +460,7 @@ void Compressor::sequential_compress() {
         }
     }
 
-    //TODO: zigzag rearrange
+    // zigzag rearrange
     std::vector<unsigned char> YRearrangedData(numPix), CbRearrangedData(numPix), CrRearrangedData(numPix);
 
     for (size_t j_block = 0; j_block < imageHeight/8; j_block++) {
@@ -326,15 +487,8 @@ void Compressor::sequential_compress() {
 
     // TODO: entropy coding
 
-    // TODO: build file:
-    // Header
-    // Comment
-    // Quantization Tables (both)
-    // Image Info
-    // Huffman Tables
-    // Encoded Blocks
-    // EOI
-
+    // TODO: write file
+    write_file();
 }
 
 void Compressor::sequential_dct(float* inputData, float* outputData, int width, int height) {
@@ -456,14 +610,22 @@ void Compressor::rgb_to_ycbcr(unsigned char* hostCharData, unsigned char* hostYC
     wbTime_stop(Generic, "Converting image from float to unsigned char");
 }
 
+FILE* outputImage;
+void write_one_byte(unsigned char byte) { fputc(byte, outputImage); };
 
 int main(int argc, char **argv) {
 
     wbArg_t args = wbArg_read(argc, argv);
 
-    Compressor compressor(args);
+    outputImage = fopen(wbArg_getOutputFile(args), "wb");
+    if (!outputImage) ERROR("Unable to open output image");
+
+    Compressor compressor(args, &write_one_byte);
+
     compressor.sequential_compress();
     // compressor.parallel_compress();
+
+    fclose(outputImage);
 
     printf("Done!\n");
 

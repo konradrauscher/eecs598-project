@@ -27,12 +27,14 @@ if [ "$#" -eq  1 ]; then
     TOTAL=0
     for test in test/*; do
         ((++TOTAL))
-        if diff <(./$1 -e $test/output.ppm -i $test/input.ppm -o $test/attempt.ppm -t image | tail -1) <(echo The solution is correct) &>/dev/null; 
+        ./$1 -i $test/input.ppm -o $test/attempt.jpg -t image &>/dev/null
+        DIFF=$(diff $test/output.jpg $test/attempt.jpg) &>/dev/null
+        if [ "$DIFF" != "" ] 
         then
+            echo "$test is incorrect..."
+        else
             ((++SCORE))
             echo "Passed $test!"
-        else
-            echo "$test is incorrect..."
         fi
     done
 
@@ -40,5 +42,12 @@ if [ "$#" -eq  1 ]; then
 fi
 
 if [ "$#" -eq  2 ]; then
-    ./$1 -e test/$2/output.ppm -i test/$2/input.ppm -o test/$2/attempt.ppm -t image
+    ./$1 -i test/$2/input.ppm -o test/$2/attempt.jpg -t image
+    DIFF=$(diff test/$2/output.jpg test/$2/attempt.jpg) &>/dev/null
+    if [ "$DIFF" != "" ] 
+    then
+        echo "test $2 is incorrect..."
+    else
+        echo "Passed test $2!"
+    fi
 fi
