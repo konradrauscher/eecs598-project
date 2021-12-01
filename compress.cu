@@ -379,6 +379,9 @@ public:
     ~Compressor();
     void sequential_compress();
     void parallel_compress();
+    size_t getNumPixels() const {
+        return (size_t)imageWidth * (size_t)imageHeight;
+    }
 };
 
 Compressor::Compressor(wbArg_t args, WRITE_ONE_BYTE _output)
@@ -831,21 +834,30 @@ void Compressor::rgb_to_ycbcr(unsigned char* hostCharData, unsigned char* hostYC
     wbTime_stop(Generic, "Converting image from float to unsigned char");
 }
 
-std::ofstream outputFile;
-void write_one_byte(unsigned char byte) { outputFile << byte; };
+//std::ofstream outputFile;
+//void write_one_byte(unsigned char byte) { outputFile << byte; };
+
+std::vector<unsigned char> outputData;
+void write_one_byte(unsigned char byte) { outputData.push_back(byte); };
 
 int main(int argc, char **argv) {
 
     wbArg_t args = wbArg_read(argc, argv);
-    
+
+    std::ofstream outputFile;
     outputFile.open(wbArg_getOutputFile(args), std::ios_base::binary);
 
     if (!outputFile.is_open()) ERROR("Opening output file failed");
 
     Compressor compressor(args, write_one_byte);
 
+    // Reserve enough in output buffer for very high-quality compression to avoid reallocation
+    outputData.reserve(compressor.getNumPixels() / 4);
+
     compressor.sequential_compress();
     // compressor.parallel_compress();
+
+    outputFile.write((const char*)outputData.data(), outputData.size());
 
     outputFile.close();
 
