@@ -39,7 +39,7 @@ __global__ void kernel_rgb_to_ycbcr(const float* input, float* output_y, float* 
         float g = input[idx*3 + 1] * 255.f;
         float b = input[idx*3 + 2] * 255.f;
 
-        output_y[idx]   =  0.f   + (0.299f   * r) + (0.587f   * g) + (0.114f   * b);
+        output_y[idx]  =  0.f  + (0.299f   * r) + (0.587f   * g) + (0.114f   * b);
         output_cr[idx] = 128.f - (0.16874f * r) - (0.33126f * g) + (0.5f     * b);
         output_cb[idx] = 128.f + (0.5f     * r) - (0.41869f * g) - (0.08131f * b);
 }
@@ -318,6 +318,17 @@ private:
         21, 34, 37, 47, 50, 56, 59, 61,
         35, 36, 48, 49, 57, 58, 62, 63  
     };
+    // Mapping of order of quantization tables to be streamed into file
+    const uint8_t ZigZagInv[64] = {  
+        0,  1,  8,  16, 9,  2,  3,  10,
+        17, 24, 32, 25, 18, 11, 4,  5,
+        12, 19, 26, 33, 40, 48, 41, 34,
+        27, 20, 13, 6,  7,  14, 21, 28,
+        35, 42, 49, 56, 57, 50, 43, 36,
+        29, 22, 15, 23, 30, 37, 44, 51,
+        58, 59, 52, 45, 38, 31, 39, 46,
+        53, 60, 61, 54, 47, 55, 62, 63 
+    };
     // Huffman definitions for first DC/AC tables (luminance / Y channel)
     const uint8_t DcLuminanceCodesPerBitsize[16]   = { 0,1,5,1,1,1,1,1,1,0,0,0,0,0,0,0 };   // sum = 12
     const uint8_t DcLuminanceValues         [12]   = { 0,1,2,3,4,5,6,7,8,9,10,11 };         // => 12 codes
@@ -344,6 +355,12 @@ private:
       0xB5,0xB6,0xB7,0xB8,0xB9,0xBA,0xC2,0xC3,0xC4,0xC5,0xC6,0xC7,0xC8,0xC9,0xCA,0xD2,0xD3,0xD4,0xD5,0xD6,0xD7,0xD8,0xD9,0xDA,
       0xE2,0xE3,0xE4,0xE5,0xE6,0xE7,0xE8,0xE9,0xEA,0xF2,0xF3,0xF4,0xF5,0xF6,0xF7,0xF8,0xF9,0xFA 
     };
+    // Huffman tables for lookup during encoding
+    BitCode* codewords;
+    BitCode huffmanLuminanceDC[256];
+    BitCode huffmanLuminanceAC[256];
+    BitCode huffmanChrominanceDC[256];
+    BitCode huffmanChrominanceAC[256];
 
     // Huffman tables (from https://github.com/nothings/stb/blob/master/stb_image_write.h)
     // TODO: why were these allocated with space for 256 elements but have much fewer than that??
@@ -398,10 +415,13 @@ private:
     DevicePtr<uint8_t> Q_c_device;
     DevicePtr<uint8_t> zigzag_map_device;
 
+    std::vector<vector<int>> RearrangedData; 
+
     void float_to_char(unsigned char* hostCharData);
     void rgb_to_ycbcr(unsigned char* hostCharData, unsigned char* hostYCbCrData);
     void sequential_dct(float* inputData, float* outputData, int width, int height);
     void write_file();
+    void generateHuffmanTable(const uint8_t numCodes[16], const uint8_t* values, BitCode result[256]);
 
 public:
     Compressor(wbArg_t args, WRITE_ONE_BYTE _output);
@@ -425,6 +445,28 @@ Compressor::Compressor(wbArg_t args, WRITE_ONE_BYTE _output)
     imageChannels = wbImage_getChannels(inputImage);
     hostInputImageData = wbImage_getData(inputImage);
     wbTime_stop(Generic, "Importing data and creating memory on host");
+
+    generateHuffmanTable(DcLuminanceCodesPerBitsize,   DcLuminanceValues,   huffmanLuminanceDC);
+    generateHuffmanTable(AcLuminanceCodesPerBitsize,   AcLuminanceValues,   huffmanLuminanceAC);
+    generateHuffmanTable(DcChrominanceCodesPerBitsize, DcChrominanceValues, huffmanChrominanceDC);
+    generateHuffmanTable(AcChrominanceCodesPerBitsize, AcChrominanceValues, huffmanChrominanceAC);
+
+    BitCode  codewordsArray[4096];     // note: quantized[i] is found at codewordsArray[quantized[i] + CodeWordLimit]
+    codewords = &codewordsArray[2048]; // allow negative indices, so quantized[i] is at codewords[quantized[i]]
+    uint8_t numBits = 1; // each codeword has at least one bit (value == 0 is undefined)
+    int32_t mask    = 1; // mask is always 2^numBits - 1, initial value 2^1-1 = 2-1 = 1
+    for (int16_t value = 1; value < 2048; value++)
+    {
+        // numBits = position of highest set bit (ignoring the sign)
+        // mask    = (2^numBits) - 1
+        if (value > mask) // one more bit ?
+        {
+        numBits++;
+        mask = (mask << 1) | 1; // append a set bit
+        }
+        codewords[-value] = BitCode(mask - value, numBits); // note that I use a negative index => codewords[-value] = codewordsArray[CodeWordLimit  value]
+        codewords[+value] = BitCode(       value, numBits);
+    }
 
     wbCheck(cudaMemcpy(dct_device.get(), dct, sizeof(dct), cudaMemcpyHostToDevice));
     wbCheck(cudaMemcpy(Q_l_device.get(), Q_l, sizeof(Q_l), cudaMemcpyHostToDevice));
@@ -464,12 +506,16 @@ void Compressor::write_file() {
     // Quantization Tables
     bitWriter.addMarker(0xDB, 2 + 2*(1 + 8*8));
     bitWriter   << 0x00;
-    for (auto i = 0; i < 8; i++) {
-        bitWriter << Q_l[i];
+    for (auto i = 0; i < 64; i++) {
+        auto y = ZigZagInv[i] / 8;
+        auto x = ZigZagInv[i] % 8;
+        bitWriter << Q_l[y][x];
     }
     bitWriter   << 0x01;
-    for (auto i = 0; i < 8; i++) {
-        bitWriter << Q_c[i];
+    for (auto i = 0; i < 64; i++) {
+        auto y = ZigZagInv[i] / 8;
+        auto x = ZigZagInv[i] % 8;
+        bitWriter << Q_c[y][x];
     }
 
     // Bits/Pixel, Image Size, Number of Channels, and Subsampling and Y vs C for each channel
@@ -481,8 +527,6 @@ void Compressor::write_file() {
                 << 0x01 << 0x11 << 0x00
                 << 0x02 << 0x11 << 0x01
                 << 0x03 << 0x11 << 0x01;
-
-    printf("0x%X 0x%X\n", imageHeight, imageWidth);
 
     // Huffman Tables
     bitWriter.addMarker(0xC4, 2+208+208);
@@ -504,11 +548,90 @@ void Compressor::write_file() {
     bitWriter << 0x00 << 0x3F << 0x00;
 
     // TODO: Image Data
+    // TODO: entropy coding
+    int16_t lastYDC  = 0;
+    int16_t lastCbDC = 0;
+    int16_t lastCrDC = 0;
 
-    // End of Image
-    bitWriter << 0xFF << 0xD9;
+    for (auto j_block = 0; j_block < imageHeight/8; j_block++) {
+        for (auto i_block = 0; i_block < imageWidth/8; i_block++) {
+
+            auto block_num = j_block * imageWidth/8 + i_block;
+
+            for (auto c = 0; c < imageChannels; c++) {
+
+                auto it = RearrangedData[c].begin() + block_num*64;
+                std::vector<int> block64(it, it + 64);
+
+                BitCode* huffman = (c == 0) ? huffmanLuminanceDC : huffmanChrominanceDC;
+                
+                int16_t lastDC;
+                if      (c == 0) { lastDC = lastYDC;  lastYDC  = block64[0]; }
+                else if (c == 1) { lastDC = lastCbDC; lastCbDC = block64[0]; }
+                else             { lastDC = lastCrDC; lastCrDC = block64[0]; }
+
+                auto diff = block64[0] - lastDC;
+                if (diff == 0) {
+                    bitWriter << huffman[0x00];
+                }
+                else {
+                    auto bits = codewords[diff];
+                    bitWriter << huffman[bits.numBits] << bits;
+                }
+
+                huffman = (c == 0) ? huffmanLuminanceAC : huffmanChrominanceAC;
+
+                // find last non-zero value in block
+                auto posNonZero = 0;
+                for (auto i = 1; i < 64; i++) {
+                    if (block64[i] != 0) posNonZero = i;
+                }
+
+                auto offset = 0;
+                for (auto i = 1; i <= posNonZero; i++) {
+                    // cound the preceding zeros before a nonzero value
+                    while (block64[i] == 0) {
+                        offset += 0x10;
+                        // write a special symbol for 16 zeros and reset count
+                        if (offset > 0xF0) {
+                            bitWriter << huffman[0xF0];
+                            offset = 0;
+                        }
+                        i++;
+                    }
+
+                    auto encoded = codewords[block64[i]];
+
+                    // combine the run with the size of the symbol
+                    bitWriter << huffman[offset + encoded.numBits] << encoded;
+                    offset = 0;
+                }
+
+                // Write an EOB if the remaining values are zero
+                if (posNonZero < 63) bitWriter << huffman[0x00];
+            }
+        }
+    }
 
     bitWriter.flush();
+    // End of Image
+
+    bitWriter << 0xFF << 0xD9;
+}
+
+void Compressor::generateHuffmanTable(const uint8_t numCodes[16], const uint8_t* values, BitCode result[256])
+{
+  // process all bitsizes 1 thru 16, no JPEG Huffman code is allowed to exceed 16 bits
+  auto huffmanCode = 0;
+  for (auto numBits = 1; numBits <= 16; numBits++)
+  {
+    // ... and each code of these bitsizes
+    for (auto i = 0; i < numCodes[numBits - 1]; i++) // note: numCodes array starts at zero, but smallest bitsize is 1
+      result[*values++] = BitCode(huffmanCode++, numBits);
+
+    // next Huffman code needs to be one bit wider
+    huffmanCode <<= 1;
+  }
 }
 
 void Compressor::sequential_compress() {
@@ -523,13 +646,14 @@ void Compressor::sequential_compress() {
 
     for (size_t i = 0; i < imageWidth*imageHeight; i++) {
 
-        float r = hostInputImageData[3*i + 0] * 255;
-        float g = hostInputImageData[3*i + 1] * 255;
-        float b = hostInputImageData[3*i + 2] * 255;
+        unsigned char r = (unsigned char) (255 * hostInputImageData[3*i + 0]);
+        unsigned char g = (unsigned char) (255 * hostInputImageData[3*i + 1]);
+        unsigned char b = (unsigned char) (255 * hostInputImageData[3*i + 2]);
 
-        YData[i]  = 0   + (0.299   * r) + (0.587   * g) + (0.114   * b);
-        CbData[i] = 128 - (0.16874 * r) - (0.33126 * g) + (0.5     * b);
-        CrData[i] = 128 + (0.5     * r) - (0.41869 * g) - (0.08131 * b);
+        YData[i]  = 0   + (0.299   * r) + (0.587   * g) + (0.114   * b) - 128;
+        CbData[i] = 128 - (0.16874 * r) - (0.33126 * g) + (0.5     * b) - 128;
+        CrData[i] = 128 + (0.5     * r) - (0.41869 * g) - (0.08131 * b) - 128;
+
     }
 
     // TODO: subsample chrominance using 4:2:0 subsampling
@@ -545,10 +669,10 @@ void Compressor::sequential_compress() {
     sequential_dct(CrData.get(), CrDctData.get(), imageWidth, imageHeight);
 
     // quantization
-    std::unique_ptr<uint8_t[]> 
-        YQData(new uint8_t[numPix]), 
-        CbQData(new uint8_t[numPix]), 
-        CrQData(new uint8_t[numPix]);
+    std::unique_ptr<int[]> 
+        YQData(new int[numPix]), 
+        CbQData(new int[numPix]), 
+        CrQData(new int[numPix]);
 
     for (size_t j_block = 0; j_block < imageHeight/8; j_block++) {
         for (size_t i_block = 0; i_block < imageWidth/8; i_block++) {
@@ -558,19 +682,19 @@ void Compressor::sequential_compress() {
                     size_t i = i_block * 8 + i_tile;
                     size_t j = j_block * 8 + j_tile;
 
-                    YQData [j * imageWidth + i] = (uint8_t) round(YDctData [j * imageWidth + i] / Q_l[j_tile][i_tile]);
-                    CbQData[j * imageWidth + i] = (uint8_t) round(CbDctData[j * imageWidth + i] / Q_c[j_tile][i_tile]);
-                    CrQData[j * imageWidth + i] = (uint8_t) round(CrDctData[j * imageWidth + i] / Q_c[j_tile][i_tile]);   
+                    YQData [j * imageWidth + i] = (int) round(YDctData [j * imageWidth + i] / Q_l[j_tile][i_tile]);
+                    CbQData[j * imageWidth + i] = (int) round(CbDctData[j * imageWidth + i] / Q_c[j_tile][i_tile]);
+                    CrQData[j * imageWidth + i] = (int) round(CrDctData[j * imageWidth + i] / Q_c[j_tile][i_tile]);   
                 }
             }
         }
     }
 
     // zigzag rearrange
-    std::unique_ptr<uint8_t[]> 
-        YRearrangedData(new uint8_t[numPix]),
-        CbRearrangedData(new uint8_t[numPix]),
-        CrRearrangedData(new uint8_t[numPix]);
+    RearrangedData.resize(3);
+    for (auto i = 0; i < 3; i++) {
+        RearrangedData[i].resize(numPix);
+    }
 
     for (size_t j_block = 0; j_block < imageHeight/8; j_block++) {
         for (size_t i_block = 0; i_block < imageWidth/8; i_block++) {
@@ -585,16 +709,14 @@ void Compressor::sequential_compress() {
                     size_t x = i_block * 8 + i_tile;
                     size_t y = j_block * 8 + j_tile;
 
-                    YRearrangedData [block_num * 64 + zigzag_map[tile_num]] = YQData [y * imageWidth + x];
-                    CbRearrangedData[block_num * 64 + zigzag_map[tile_num]] = CbQData[y * imageWidth + x];
-                    CrRearrangedData[block_num * 64 + zigzag_map[tile_num]] = CrQData[y * imageWidth + x];
+                    RearrangedData[0][block_num * 64 + zigzag_map[tile_num]] = YQData [y * imageWidth + x];
+                    RearrangedData[1][block_num * 64 + zigzag_map[tile_num]] = CbQData[y * imageWidth + x];
+                    RearrangedData[2][block_num * 64 + zigzag_map[tile_num]] = CrQData[y * imageWidth + x];
 
                 }
             }
         }
     }
-
-    // TODO: entropy coding
 
     // TODO: write file
     write_file();
@@ -761,7 +883,7 @@ int main(int argc, char **argv) {
     compressor.sequential_compress();
     // compressor.parallel_compress();
 
-    printf("Done!\n");
+    outputFile.close();
 
     return 0;
 }
