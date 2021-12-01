@@ -94,7 +94,7 @@ __global__ void kernel_quantize_dct_output(const float* inputData, int16_t* outp
     outputData[j * width + i] = (int16_t) round(inputData[j * width + i] / Q[j_tile*8 + i_tile]);
 }
 
-__global__ void kernel_zigzag(const int16_t* inputData, int16_t* outputData, const uint8_t* zigzag_map, uint width, uint height) {
+__global__ void kernel_zigzag(const int16_t* inputData, int* outputData, const uint8_t* zigzag_map, uint width, uint height) {
     assert(blockDim.x == 8);
     assert(blockDim.y == 8);
 
@@ -723,8 +723,8 @@ void Compressor::parallel_compress() {
     DevicePtr<float> deviceYCbCrImageData(numEl);
     DevicePtr<float> deviceDCTData(numEl);
     DevicePtr<int16_t> deviceQuantData(numEl);
-    DevicePtr<int16_t> deviceZigzagData(numEl);
-    DevicePtr<int16_t> deviceDcCoeffDiffs(numBlocks * 3);
+    DevicePtr<int> deviceZigzagData(numEl); //TODO should be int16
+    //DevicePtr<int16_t> deviceDcCoeffDiffs(numBlocks * 3);
 
     dim3 DimGrid1((imageWidth*imageHeight*imageChannels-1)/1024 + 1, 1, 1);
     dim3 DimBlock1(1024, 1, 1);
@@ -760,9 +760,9 @@ void Compressor::parallel_compress() {
 
     wbCheck(cudaDeviceSynchronize());
 
-    int16_t* deviceYZigzag = deviceZigzagData.get();
-    int16_t* deviceCbZigzag = deviceYZigzag + numPix;
-    int16_t* deviceCrZigzag = deviceCbZigzag + numPix;
+    int* deviceYZigzag = deviceZigzagData.get();
+    int* deviceCbZigzag = deviceYZigzag + numPix;
+    int* deviceCrZigzag = deviceCbZigzag + numPix;
 
     kernel_zigzag << <DimGrid2, DimBlock2 >> > (deviceYQuant,  deviceYZigzag,  zigzag_map_device.get(), imageWidth, imageHeight);
     kernel_zigzag << <DimGrid2, DimBlock2 >> > (deviceCbQuant, deviceCbZigzag, zigzag_map_device.get(), imageWidth, imageHeight);
@@ -770,7 +770,7 @@ void Compressor::parallel_compress() {
 
     //Note that this and the next kernel can be done independently of each other
 
-    dim3 DimGrid3((imageHeight - 1) / (8*16) + 1, (imageWidth - 1) / (8*16) + 1, 1);
+    /*dim3 DimGrid3((imageHeight - 1) / (8*16) + 1, (imageWidth - 1) / (8*16) + 1, 1);
     dim3 DimBlock3(16, 16, 1);
 
     int16_t* dcY = deviceDcCoeffDiffs.get();
@@ -779,10 +779,23 @@ void Compressor::parallel_compress() {
 
     kernel_subtract_dc_values << <DimGrid3, DimBlock3 >> > (deviceYQuant, dcY, imageWidth, imageHeight);
     kernel_subtract_dc_values << <DimGrid3, DimBlock3 >> > (deviceCbQuant, dcCb, imageWidth, imageHeight);
-    kernel_subtract_dc_values << <DimGrid3, DimBlock3 >> > (deviceCrQuant, dcCr, imageWidth, imageHeight);
+    kernel_subtract_dc_values << <DimGrid3, DimBlock3 >> > (deviceCrQuant, dcCr, imageWidth, imageHeight);*/
 
     wbCheck(cudaDeviceSynchronize());
 
+
+    RearrangedData.resize(3);
+    for (auto i = 0; i < 3; i++) {
+        RearrangedData[i].resize(numPix);
+    }
+
+    size_t memcpySize = imageWidth * imageHeight * sizeof(*deviceYZigzag);
+    wbCheck(cudaMemcpy(RearrangedData[0].data(), deviceYZigzag, memcpySize, cudaMemcpyDeviceToHost));
+    wbCheck(cudaMemcpy(RearrangedData[1].data(), deviceCbZigzag, memcpySize, cudaMemcpyDeviceToHost));
+    wbCheck(cudaMemcpy(RearrangedData[2].data(), deviceCrZigzag, memcpySize, cudaMemcpyDeviceToHost));
+
+
+    write_file();
 }
 
 void Compressor::float_to_char(unsigned char* hostCharData) {
