@@ -33,7 +33,7 @@ __global__ void kernel_rgb_to_ycbcr(const float* input, float* output_y, float* 
     
         uint idx = blockIdx.x * blockDim.x + threadIdx.x;
 
-        if(idx >  num_rgb_pix) return;
+        if(idx >=  num_rgb_pix) return;
 
         float r = input[idx*3]     * 255.f;
         float g = input[idx*3 + 1] * 255.f;
@@ -90,6 +90,7 @@ __global__ void kernel_quantize_dct_output(const float* inputData, int16_t* outp
     
     size_t i = i_block * 8 + i_tile;
     size_t j = j_block * 8 + j_tile;
+    if (i >= width || j >= height) return;
 
     outputData[j * width + i] = (int16_t) round(inputData[j * width + i] / Q[j_tile*8 + i_tile]);
 }
@@ -104,6 +105,8 @@ __global__ void kernel_zigzag(const int16_t* inputData, int* outputData, const u
     size_t tile_num = j_tile * 8 + i_tile;
     size_t x = i_block * 8 + i_tile;
     size_t y = j_block * 8 + j_tile;
+
+    if (x >= width || y >= height) return;
 
     outputData[block_num * 64 + zigzag_map[tile_num]] = inputData[y * width + x];
 }
