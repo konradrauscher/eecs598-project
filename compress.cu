@@ -1,5 +1,6 @@
 #include <wb.h>
-#include <vector>
+#include <memory>
+#include <fstream>
 
 #define pi 3.14159265f
 #define sqrt1_2 0.707106781f
@@ -77,6 +78,7 @@ __global__ void kernel_block_dct(const float* inputData, float* outputData, cons
     outputData[j * width + i] = 0.25 * c_i * c_j * sum;
 }
 
+
 //Call this once for each channel
 __global__ void kernel_quantize_dct_output(const float* inputData, uint8_t* outputData, const uint8_t* Q, uint width, uint height)
 {
@@ -92,6 +94,55 @@ __global__ void kernel_quantize_dct_output(const float* inputData, uint8_t* outp
     outputData[j * width + i] = (uint8_t) round(inputData[j * width + i] / Q[j_tile*8 + i_tile]);
 }
 
+__global__ void kernel_zigzag(const uint8_t* inputData, uint8_t* outputData, const uint8_t* zigzag_map, uint width, uint height) {
+    assert(blockDim.x == 8);
+    assert(blockDim.y == 8);
+
+    uint j_block = blockIdx.y, i_block = blockIdx.x;
+    uint j_tile = threadIdx.y, i_tile = threadIdx.x;
+    size_t block_num = j_block * width / 8 + i_block;
+    size_t tile_num = j_tile * 8 + i_tile;
+    size_t x = i_block * 8 + i_tile;
+    size_t y = j_block * 8 + j_tile;
+
+    outputData[block_num * 64 + zigzag_map[tile_num]] = inputData[y * width + x];
+}
+
+
+// Call with a single (square) block so it's possible to synchronize
+// Scratch needs to be big enough to temporarily hold the result for each block
+template<uint BLOCK_DIM>
+__global__ void kernel_subtract_dc_values(const uint8_t* inputData, int8_t* diffs, uint width, uint height) {
+    uint tx = threadIdx.x, ty = threadIdx.y;
+
+    
+    //TODO - MAY NEED TO CHANGE FOR PARTIAL BLOCKS
+    uint numBlocksX = width / 8;
+    uint numBlocksY = height / 8;
+
+    // I think i and j might be switched here from what they are in the rest of the code
+    for(uint ii = tx; ii < numBlocksY; ii += BLOCK_DIM){
+        for (uint jj = ty; jj < numBlocksX; jj += BLOCK_DIM) {
+
+            if (ii == 0 && jj == 0) {
+                diffs[0] = 0;
+                continue;
+            }
+
+            //ii and jj are indices of current JPEG block
+            
+            //indices of previous JPEG block
+            uint ii_prev = (jj == 0) ? (ii - 1) : ii;
+            uint jj_prev = (jj == 0) ? (numBlocksY - 1) : jj - 1;
+
+            uint8_t curr_dc = inputData[ii * 8 * width + jj * 8];
+            uint8_t prev_dc = inputData[ii_prev * 8 * width + jj_prev * 8];
+
+            // I believe the wraparound should work correctly here?
+            diffs[ii * numBlocksX + jj] = curr_dc - prev_dc;
+        }
+    }
+}
 
 template<typename T>
 class DevicePtr{
@@ -130,7 +181,7 @@ public:
     }
 };
 
-// represent a single Huffman code
+// represent a single Huffman code i.e. a sequence of bits with length up to 16
 struct BitCode
 {
   BitCode() = default; // undefined state, must be initialized at a later time
@@ -312,6 +363,54 @@ private:
     BitCode huffmanLuminanceAC[256];
     BitCode huffmanChrominanceDC[256];
     BitCode huffmanChrominanceAC[256];
+
+    // Huffman tables (from https://github.com/nothings/stb/blob/master/stb_image_write.h)
+    // TODO: why were these allocated with space for 256 elements but have much fewer than that??
+    // TBH we may just want to copy the toojpeg implementation
+    const BitCode YDC_HT[256] = { {0,2},{2,3},{3,3},{4,3},{5,3},{6,3},{14,4},{30,5},{62,6},{126,7},{254,8},{510,9} };
+    const BitCode UVDC_HT[256] = { {0,2},{1,2},{2,2},{6,3},{14,4},{30,5},{62,6},{126,7},{254,8},{510,9},{1022,10},{2046,11} };
+    const BitCode YAC_HT[256] = {
+       {10,4},{0,2},{1,2},{4,3},{11,4},{26,5},{120,7},{248,8},{1014,10},{65410,16},{65411,16},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},
+       {12,4},{27,5},{121,7},{502,9},{2038,11},{65412,16},{65413,16},{65414,16},{65415,16},{65416,16},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},
+       {28,5},{249,8},{1015,10},{4084,12},{65417,16},{65418,16},{65419,16},{65420,16},{65421,16},{65422,16},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},
+       {58,6},{503,9},{4085,12},{65423,16},{65424,16},{65425,16},{65426,16},{65427,16},{65428,16},{65429,16},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},
+       {59,6},{1016,10},{65430,16},{65431,16},{65432,16},{65433,16},{65434,16},{65435,16},{65436,16},{65437,16},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},
+       {122,7},{2039,11},{65438,16},{65439,16},{65440,16},{65441,16},{65442,16},{65443,16},{65444,16},{65445,16},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},
+       {123,7},{4086,12},{65446,16},{65447,16},{65448,16},{65449,16},{65450,16},{65451,16},{65452,16},{65453,16},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},
+       {250,8},{4087,12},{65454,16},{65455,16},{65456,16},{65457,16},{65458,16},{65459,16},{65460,16},{65461,16},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},
+       {504,9},{32704,15},{65462,16},{65463,16},{65464,16},{65465,16},{65466,16},{65467,16},{65468,16},{65469,16},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},
+       {505,9},{65470,16},{65471,16},{65472,16},{65473,16},{65474,16},{65475,16},{65476,16},{65477,16},{65478,16},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},
+       {506,9},{65479,16},{65480,16},{65481,16},{65482,16},{65483,16},{65484,16},{65485,16},{65486,16},{65487,16},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},
+       {1017,10},{65488,16},{65489,16},{65490,16},{65491,16},{65492,16},{65493,16},{65494,16},{65495,16},{65496,16},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},
+       {1018,10},{65497,16},{65498,16},{65499,16},{65500,16},{65501,16},{65502,16},{65503,16},{65504,16},{65505,16},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},
+       {2040,11},{65506,16},{65507,16},{65508,16},{65509,16},{65510,16},{65511,16},{65512,16},{65513,16},{65514,16},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},
+       {65515,16},{65516,16},{65517,16},{65518,16},{65519,16},{65520,16},{65521,16},{65522,16},{65523,16},{65524,16},{0,0},{0,0},{0,0},{0,0},{0,0},
+       {2041,11},{65525,16},{65526,16},{65527,16},{65528,16},{65529,16},{65530,16},{65531,16},{65532,16},{65533,16},{65534,16},{0,0},{0,0},{0,0},{0,0},{0,0}
+    };
+    const BitCode UVAC_HT[256] = {
+       {0,2},{1,2},{4,3},{10,4},{24,5},{25,5},{56,6},{120,7},{500,9},{1014,10},{4084,12},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},
+       {11,4},{57,6},{246,8},{501,9},{2038,11},{4085,12},{65416,16},{65417,16},{65418,16},{65419,16},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},
+       {26,5},{247,8},{1015,10},{4086,12},{32706,15},{65420,16},{65421,16},{65422,16},{65423,16},{65424,16},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},
+       {27,5},{248,8},{1016,10},{4087,12},{65425,16},{65426,16},{65427,16},{65428,16},{65429,16},{65430,16},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},
+       {58,6},{502,9},{65431,16},{65432,16},{65433,16},{65434,16},{65435,16},{65436,16},{65437,16},{65438,16},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},
+       {59,6},{1017,10},{65439,16},{65440,16},{65441,16},{65442,16},{65443,16},{65444,16},{65445,16},{65446,16},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},
+       {121,7},{2039,11},{65447,16},{65448,16},{65449,16},{65450,16},{65451,16},{65452,16},{65453,16},{65454,16},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},
+       {122,7},{2040,11},{65455,16},{65456,16},{65457,16},{65458,16},{65459,16},{65460,16},{65461,16},{65462,16},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},
+       {249,8},{65463,16},{65464,16},{65465,16},{65466,16},{65467,16},{65468,16},{65469,16},{65470,16},{65471,16},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},
+       {503,9},{65472,16},{65473,16},{65474,16},{65475,16},{65476,16},{65477,16},{65478,16},{65479,16},{65480,16},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},
+       {504,9},{65481,16},{65482,16},{65483,16},{65484,16},{65485,16},{65486,16},{65487,16},{65488,16},{65489,16},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},
+       {505,9},{65490,16},{65491,16},{65492,16},{65493,16},{65494,16},{65495,16},{65496,16},{65497,16},{65498,16},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},
+       {506,9},{65499,16},{65500,16},{65501,16},{65502,16},{65503,16},{65504,16},{65505,16},{65506,16},{65507,16},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},
+       {2041,11},{65508,16},{65509,16},{65510,16},{65511,16},{65512,16},{65513,16},{65514,16},{65515,16},{65516,16},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},
+       {16352,14},{65517,16},{65518,16},{65519,16},{65520,16},{65521,16},{65522,16},{65523,16},{65524,16},{65525,16},{0,0},{0,0},{0,0},{0,0},{0,0},
+       {1018,10},{32707,15},{65526,16},{65527,16},{65528,16},{65529,16},{65530,16},{65531,16},{65532,16},{65533,16},{65534,16},{0,0},{0,0},{0,0},{0,0},{0,0}
+    };
+    const int YQT[64] = { 16,11,10,16,24,40,51,61,12,12,14,19,26,58,60,55,14,13,16,24,40,57,69,56,14,17,22,29,51,87,80,62,18,22,
+                              37,56,68,109,103,77,24,35,55,64,81,104,113,92,49,64,78,87,103,121,120,101,72,92,95,98,112,100,103,99 };
+    const int UVQT[64] = { 17,18,24,47,99,99,99,99,18,21,26,66,99,99,99,99,24,26,56,99,99,99,99,99,47,66,99,99,99,99,99,99,
+                               99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99 };
+    const float aasf[8] = { 1.0f * 2.828427125f, 1.387039845f * 2.828427125f, 1.306562965f * 2.828427125f, 1.175875602f * 2.828427125f,
+                                  1.0f * 2.828427125f, 0.785694958f * 2.828427125f, 0.541196100f * 2.828427125f, 0.275899379f * 2.828427125f };
 
     DevicePtr<float> dct_device;
     DevicePtr<uint8_t> Q_l_device;
@@ -542,7 +641,10 @@ void Compressor::sequential_compress() {
     size_t numPix = imageWidth*imageHeight;
 
     // convert from RGB floats to YCbCr in separate channels
-    std::vector<float> YData(numPix), CbData(numPix), CrData(numPix);
+    std::unique_ptr<float[]> 
+        YData(new float[numPix]), 
+        CbData(new float[numPix]),
+        CrData(new float[numPix]);
 
     for (size_t i = 0; i < imageWidth*imageHeight; i++) {
 
@@ -559,14 +661,20 @@ void Compressor::sequential_compress() {
     // TODO: subsample chrominance using 4:2:0 subsampling
 
     // discrete cosine transform
-    std::vector<float> YDctData(numPix), CbDctData(numPix), CrDctData(numPix);
+    std::unique_ptr<float[]>
+        YDctData(new float[numPix]),
+        CbDctData(new float[numPix]),
+        CrDctData(new float[numPix]);
 
-    sequential_dct(YData.data(),  YDctData.data(),  imageWidth, imageHeight);
-    sequential_dct(CbData.data(), CbDctData.data(), imageWidth, imageHeight);
-    sequential_dct(CrData.data(), CrDctData.data(), imageWidth, imageHeight);
+    sequential_dct(YData.get(),  YDctData.get(),  imageWidth, imageHeight);
+    sequential_dct(CbData.get(), CbDctData.get(), imageWidth, imageHeight);
+    sequential_dct(CrData.get(), CrDctData.get(), imageWidth, imageHeight);
 
     // quantization
-    std::vector<int> YQData(numPix), CbQData(numPix), CrQData(numPix);
+    std::unique_ptr<int[]> 
+        YQData(new int[numPix]), 
+        CbQData(new int[numPix]), 
+        CrQData(new int[numPix]);
 
     for (size_t j_block = 0; j_block < imageHeight/8; j_block++) {
         for (size_t i_block = 0; i_block < imageWidth/8; i_block++) {
@@ -660,11 +768,14 @@ void Compressor::parallel_compress() {
 
     size_t numPix = imageWidth * imageHeight;
     size_t numEl = numPix * imageChannels;
+    size_t numBlocks = numPix / 64;
 
     DevicePtr<float> deviceRGBImageData(numEl);
     DevicePtr<float> deviceYCbCrImageData(numEl);
     DevicePtr<float> deviceDCTData(numEl);
     DevicePtr<uint8_t> deviceQuantData(numEl);
+    DevicePtr<uint8_t> deviceZigzagData(numEl);
+    DevicePtr<int8_t> deviceDcCoeffDiffs(numBlocks * 3);
 
     dim3 DimGrid1((imageWidth*imageHeight*imageChannels-1)/1024 + 1, 1, 1);
     dim3 DimBlock1(1024, 1, 1);
@@ -697,6 +808,29 @@ void Compressor::parallel_compress() {
     kernel_quantize_dct_output<<<DimGrid2, DimBlock2>>>(deviceYDCT,  deviceYQuant,  Q_l_device.get(), imageWidth, imageHeight);
     kernel_quantize_dct_output<<<DimGrid2, DimBlock2>>>(deviceCbDCT, deviceCbQuant, Q_c_device.get(), imageWidth, imageHeight);
     kernel_quantize_dct_output<<<DimGrid2, DimBlock2>>>(deviceCrDCT, deviceCrQuant, Q_c_device.get(), imageWidth, imageHeight);
+
+    wbCheck(cudaDeviceSynchronize());
+
+    uint8_t* deviceYZigzag = deviceZigzagData.get();
+    uint8_t* deviceCbZigzag = deviceYZigzag + numPix;
+    uint8_t* deviceCrZigzag = deviceCbZigzag + numPix;
+
+    kernel_zigzag << <DimGrid2, DimBlock2 >> > (deviceYQuant,  deviceYZigzag,  zigzag_map_device.get(), imageWidth, imageHeight);
+    kernel_zigzag << <DimGrid2, DimBlock2 >> > (deviceCbQuant, deviceCbZigzag, zigzag_map_device.get(), imageWidth, imageHeight);
+    kernel_zigzag << <DimGrid2, DimBlock2 >> > (deviceCrQuant, deviceCrZigzag, zigzag_map_device.get(), imageWidth, imageHeight);
+
+    //Note that this and the next kernel can be done independently of each other
+
+    dim3 DimGrid3((imageHeight - 1) / (8*16) + 1, (imageWidth - 1) / (8*16) + 1, 1);
+    dim3 DimBlock3(16, 16, 1);
+
+    int8_t* dcY = deviceDcCoeffDiffs.get();
+    int8_t* dcCb = dcY + numBlocks;
+    int8_t* dcCr = dcCb + numBlocks;
+
+    kernel_subtract_dc_values<16> << <DimGrid3, DimBlock3 >> > (deviceYQuant, dcY, imageWidth, imageHeight);
+    kernel_subtract_dc_values<16> << <DimGrid3, DimBlock3 >> > (deviceCbQuant, dcCb, imageWidth, imageHeight);
+    kernel_subtract_dc_values<16> << <DimGrid3, DimBlock3 >> > (deviceCrQuant, dcCr, imageWidth, imageHeight);
 
     wbCheck(cudaDeviceSynchronize());
 
@@ -735,22 +869,23 @@ void Compressor::rgb_to_ycbcr(unsigned char* hostCharData, unsigned char* hostYC
     wbTime_stop(Generic, "Converting image from float to unsigned char");
 }
 
-FILE* outputImage;
-void write_one_byte(unsigned char byte) { fputc(byte, outputImage); };
+std::ofstream outputFile;
+void write_one_byte(unsigned char byte) { outputFile << byte; };
 
 int main(int argc, char **argv) {
 
     wbArg_t args = wbArg_read(argc, argv);
+    
+    outputFile.open(wbArg_getOutputFile(args), std::ios_base::binary);
 
-    outputImage = fopen(wbArg_getOutputFile(args), "wb");
-    if (!outputImage) ERROR("Unable to open output image");
+    if (!outputFile.is_open()) ERROR("Opening output file failed");
 
-    Compressor compressor(args, &write_one_byte);
+    Compressor compressor(args, write_one_byte);
 
     compressor.sequential_compress();
     // compressor.parallel_compress();
 
-    fclose(outputImage);
+    outputFile.close();
 
     return 0;
 }
