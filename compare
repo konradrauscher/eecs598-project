@@ -15,9 +15,10 @@
 # The application(s) to execute along with its input arguments and options
 
 export LD_LIBRARY_PATH=$PWD/libwb/build/:$LD_LIBRARY_PATH
-TESTNUM=2
+TESTNUM=$1
 
 echo "running sequential..."
-./parallel.out -i test/$TESTNUM/input.ppm -o test/$TESTNUM/attempt.jpg -t image
+./parallel.out -i test/$TESTNUM/input.ppm -o test/$TESTNUM/attempt_seq.jpg -t image
 echo "running parallel..."
-./parallel.out -i test/$TESTNUM/input.ppm -o test/$TESTNUM/attempt.jpg -t image --parallel
+#nvprof --cpu-profiling on 
+./parallel.out -i test/$TESTNUM/input.ppm -o test/$TESTNUM/attempt_par.jpg -t image --parallel
