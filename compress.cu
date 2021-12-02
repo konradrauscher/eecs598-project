@@ -82,7 +82,7 @@ __global__ void kernel_block_dct(const float* inputData, float* outputData, cons
 
 
 //Call this once for each channel
-__global__ void kernel_quantize_dct_output(const float* inputData, int16_t* outputData, const uint8_t* Q, uint width, uint height)
+__global__ void kernel_quantize_dct_output(const float* inputData, int* outputData, const uint8_t* Q, uint width, uint height)
 {
     assert(blockDim.x == 8);
     assert(blockDim.y == 8);
@@ -94,10 +94,10 @@ __global__ void kernel_quantize_dct_output(const float* inputData, int16_t* outp
     size_t j = j_block * 8 + j_tile;
     if (i >= width || j >= height) return;
 
-    outputData[j * width + i] = (int16_t) round(inputData[j * width + i] / Q[j_tile*8 + i_tile]);
+    outputData[j * width + i] = (int) round(inputData[j * width + i] / Q[j_tile*8 + i_tile]);
 }
 
-__global__ void kernel_zigzag(const int16_t* inputData, int* outputData, const uint8_t* zigzag_map, uint width, uint height) {
+__global__ void kernel_zigzag(const int* inputData, int* outputData, const uint8_t* zigzag_map, uint width, uint height) {
     assert(blockDim.x == 8);
     assert(blockDim.y == 8);
 
@@ -741,7 +741,7 @@ void Compressor::parallel_compress() {
     DevicePtr<float> deviceRGBImageData(numEl);
     DevicePtr<float> deviceYCbCrImageData(numEl);
     DevicePtr<float> deviceDCTData(numEl);
-    DevicePtr<int16_t> deviceQuantData(numEl);
+    DevicePtr<int> deviceQuantData(numEl);
     DevicePtr<int> deviceZigzagData(numEl); //TODO should be int16
     //DevicePtr<int16_t> deviceDcCoeffDiffs(numBlocks * 3);
 
@@ -771,9 +771,9 @@ void Compressor::parallel_compress() {
 
     wbCheck(cudaDeviceSynchronize());
 
-    int16_t* deviceYQuant = deviceQuantData.get();
-    int16_t* deviceCbQuant = deviceYQuant + numPix;
-    int16_t* deviceCrQuant = deviceCbQuant + numPix;
+    int* deviceYQuant = deviceQuantData.get();
+    int* deviceCbQuant = deviceYQuant + numPix;
+    int* deviceCrQuant = deviceCbQuant + numPix;
 
     kernel_quantize_dct_output<<<DimGrid2, DimBlock2>>>(deviceYDCT,  deviceYQuant,  Q_l_device.get(), imageWidth, imageHeight);
     kernel_quantize_dct_output<<<DimGrid2, DimBlock2>>>(deviceCbDCT, deviceCbQuant, Q_c_device.get(), imageWidth, imageHeight);
