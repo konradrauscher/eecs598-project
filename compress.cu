@@ -360,6 +360,7 @@ private:
       0xE2,0xE3,0xE4,0xE5,0xE6,0xE7,0xE8,0xE9,0xEA,0xF2,0xF3,0xF4,0xF5,0xF6,0xF7,0xF8,0xF9,0xFA 
     };
     // Huffman tables for lookup during encoding
+    BitCode  codewordsArray[4096];     // note: quantized[i] is found at codewordsArray[quantized[i] + CodeWordLimit]
     BitCode* codewords;
     BitCode huffmanLuminanceDC[256];
     BitCode huffmanLuminanceAC[256];
@@ -410,7 +411,6 @@ Compressor::Compressor(wbArg_t args, WRITE_ONE_BYTE _output)
     generateHuffmanTable(DcChrominanceCodesPerBitsize, DcChrominanceValues, huffmanChrominanceDC);
     generateHuffmanTable(AcChrominanceCodesPerBitsize, AcChrominanceValues, huffmanChrominanceAC);
 
-    BitCode  codewordsArray[4096];     // note: quantized[i] is found at codewordsArray[quantized[i] + CodeWordLimit]
     codewords = &codewordsArray[2048]; // allow negative indices, so quantized[i] is at codewords[quantized[i]]
     uint8_t numBits = 1; // each codeword has at least one bit (value == 0 is undefined)
     int32_t mask    = 1; // mask is always 2^numBits - 1, initial value 2^1-1 = 2-1 = 1
