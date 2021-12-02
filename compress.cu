@@ -39,9 +39,9 @@ __global__ void kernel_rgb_to_ycbcr(const float* input, float* output_y, float* 
         float g = input[idx*3 + 1] * 255.f;
         float b = input[idx*3 + 2] * 255.f;
 
-        output_y[idx]  =  0.f  + (0.299f   * r) + (0.587f   * g) + (0.114f   * b);
-        output_cr[idx] = 128.f - (0.16874f * r) - (0.33126f * g) + (0.5f     * b);
-        output_cb[idx] = 128.f + (0.5f     * r) - (0.41869f * g) - (0.08131f * b);
+        output_y[idx]  =  0.f  + (0.299f   * r) + (0.587f   * g) + (0.114f   * b) - 128.f;
+        output_cb[idx] = 128.f - (0.16874f * r) - (0.33126f * g) + (0.5f     * b) - 128.f;
+        output_cr[idx] = 128.f + (0.5f     * r) - (0.41869f * g) - (0.08131f * b) - 128.f;
 }
 
 // Each thread loops over the pixels in its block to generate a single output pixel.
@@ -440,7 +440,18 @@ Compressor::~Compressor() {
 }
 
 void Compressor::write_file() {   
-
+    if((size_t)imageWidth*(size_t)imageHeight <= 1024){
+        for(size_t ii = 0, idx = 0; ii < imageHeight; ++ii){
+            for(size_t jj = 0; jj < imageWidth; ++jj, ++idx){
+                printf("%4d %4d %4d          ",
+                    (int)RearrangedData[0][idx],
+                    (int)RearrangedData[1][idx],
+                    (int)RearrangedData[2][idx]);
+            }
+        printf("\n\n");
+        }
+    }
+    
     const uint8_t HeaderJfif[2+2+16] = { 
         0xFF,0xD8,          // SOI marker (start of image)
         0xFF,0xE0,          // JFIF APP0 tag
@@ -734,7 +745,9 @@ void Compressor::parallel_compress() {
     DevicePtr<int> deviceZigzagData(numEl); //TODO should be int16
     //DevicePtr<int16_t> deviceDcCoeffDiffs(numBlocks * 3);
 
-    dim3 DimGrid1((imageWidth*imageHeight*imageChannels-1)/1024 + 1, 1, 1);
+    wbCheck(cudaMemcpy(deviceRGBImageData.get(), hostInputImageData, numEl*sizeof(float), cudaMemcpyHostToDevice));
+    
+    dim3 DimGrid1((numPix-1)/1024 + 1, 1, 1);
     dim3 DimBlock1(1024, 1, 1);
 
     float* deviceY = deviceYCbCrImageData.get();
@@ -749,7 +762,7 @@ void Compressor::parallel_compress() {
     float* deviceCbDCT = deviceYDCT + numPix;
     float* deviceCrDCT = deviceCbDCT + numPix;
 
-    dim3 DimGrid2((imageHeight-1)/8+1, (imageWidth-1)/8 + 1, 1);
+    dim3 DimGrid2((imageWidth-1)/8+1, (imageHeight-1)/8 + 1, 1);
     dim3 DimBlock2(8,8,1);
 
     kernel_block_dct<<<DimGrid2, DimBlock2>>>(deviceY,  deviceYDCT,  dct_device.get(), imageWidth, imageHeight);
