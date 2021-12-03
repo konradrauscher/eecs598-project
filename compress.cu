@@ -20,16 +20,6 @@ using T_Quant = int;
     }                                                                     \
   } while (0)
 
-__global__ void kernel_float_to_char(float* input, unsigned char* output, uint num) {
-
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (idx < num) {
-        output[idx] = (unsigned char) (255 * input[idx]);
-    }
-
-    return;
-}
 
 // Naive kernel with no optimization for coalescing
 __global__ void kernel_rgb_to_ycbcr(const float* input, float* output_y, float* output_cb, float* output_cr, uint num_rgb_pix){
@@ -116,38 +106,6 @@ __global__ void kernel_zigzag(const int* inputData, T_Quant* outputData, const u
     outputData[block_num * 64 + zigzag_map[tile_num]] = inputData[y * width + x];
 }
 
-
-// Input data is an image, output data is length num_jpeg_blocks and encodes the DC offset for each block
-__global__ void kernel_subtract_dc_values(const int16_t* inputData, int16_t* diffs, uint width, uint height) {
-    uint tx = threadIdx.x, ty = threadIdx.y;
-
-    
-    //TODO - MAY NEED TO CHANGE FOR PARTIAL BLOCKS
-    uint numBlocksX = width / 8;
-    uint numBlocksY = height / 8;
-
-    // I think i and j might be switched here from what they are in the rest of the code
-    for(uint ii = tx; ii < numBlocksY; ii += blockDim.y){
-        for (uint jj = ty; jj < numBlocksX; jj += blockDim.x) {
-
-            if (ii == 0 && jj == 0) {
-                diffs[0] = 0;
-                continue;
-            }
-
-            //ii and jj are indices of current JPEG block
-            
-            //indices of previous JPEG block
-            uint ii_prev = (jj == 0) ? (ii - 1) : ii;
-            uint jj_prev = (jj == 0) ? (numBlocksY - 1) : jj - 1;
-
-            uint8_t curr_dc = inputData[ii * 8 * width + jj * 8];
-            uint8_t prev_dc = inputData[ii_prev * 8 * width + jj_prev * 8];
-
-            diffs[ii * numBlocksX + jj] = curr_dc - prev_dc;
-        }
-    }
-}
 
 template<typename T>
 class DevicePtr{
@@ -377,8 +335,6 @@ private:
 
     std::vector<vector<T_Quant>> RearrangedData;
 
-    void float_to_char(unsigned char* hostCharData);
-    void rgb_to_ycbcr(unsigned char* hostCharData, unsigned char* hostYCbCrData);
     void sequential_dct(float* inputData, float* outputData, int width, int height);
     void write_file();
     void generateHuffmanTable(const uint8_t numCodes[16], const uint8_t* values, BitCode result[256]);
@@ -739,14 +695,12 @@ void Compressor::parallel_compress() {
 
     size_t numPix = imageWidth * imageHeight;
     size_t numEl = numPix * imageChannels;
-    //size_t numBlocks = numPix / 64;
 
     DevicePtr<float> deviceRGBImageData(numEl);
     DevicePtr<float> deviceYCbCrImageData(numEl);
     DevicePtr<float> deviceDCTData(numEl);
     DevicePtr<T_Quant> deviceQuantData(numEl);
     DevicePtr<T_Quant> deviceZigzagData(numEl);
-    //DevicePtr<int16_t> deviceDcCoeffDiffs(numBlocks * 3);
 
     wbCheck(cudaMemcpy(deviceRGBImageData.get(), hostInputImageData, numEl*sizeof(float), cudaMemcpyHostToDevice));
     
@@ -792,19 +746,6 @@ void Compressor::parallel_compress() {
     kernel_zigzag << <DimGrid2, DimBlock2 >> > (deviceCbQuant, deviceCbZigzag, zigzag_map_device.get(), imageWidth, imageHeight);
     kernel_zigzag << <DimGrid2, DimBlock2 >> > (deviceCrQuant, deviceCrZigzag, zigzag_map_device.get(), imageWidth, imageHeight);
 
-    //Note that this and the next kernel can be done independently of each other
-
-    /*dim3 DimGrid3((imageHeight - 1) / (8*16) + 1, (imageWidth - 1) / (8*16) + 1, 1);
-    dim3 DimBlock3(16, 16, 1);
-
-    int16_t* dcY = deviceDcCoeffDiffs.get();
-    int16_t* dcCb = dcY + numBlocks;
-    int16_t* dcCr = dcCb + numBlocks;
-
-    kernel_subtract_dc_values << <DimGrid3, DimBlock3 >> > (deviceYQuant, dcY, imageWidth, imageHeight);
-    kernel_subtract_dc_values << <DimGrid3, DimBlock3 >> > (deviceCbQuant, dcCb, imageWidth, imageHeight);
-    kernel_subtract_dc_values << <DimGrid3, DimBlock3 >> > (deviceCrQuant, dcCr, imageWidth, imageHeight);*/
-
     wbCheck(cudaDeviceSynchronize());
 
 
@@ -822,41 +763,6 @@ void Compressor::parallel_compress() {
     write_file();
 }
 
-void Compressor::float_to_char(unsigned char* hostCharData) {
-    wbTime_start(Generic, "Converting image from float to unsigned char");
-
-    float* deviceInputImageData;
-    unsigned char* deviceCharData;
-    
-
-    cudaMalloc((void **) &deviceInputImageData, imageWidth*imageHeight*imageChannels*sizeof(float));
-    cudaMalloc((void **) &deviceCharData, imageWidth*imageHeight*imageChannels*sizeof(unsigned char));
-
-    cudaMemcpy(deviceInputImageData, hostInputImageData, imageWidth*imageHeight*imageChannels*sizeof(float), cudaMemcpyHostToDevice);
-
-    dim3 DimGrid1((imageWidth*imageHeight*imageChannels-1)/1024 + 1, 1, 1);
-    dim3 DimBlock1(1024, 1, 1);
-
-    kernel_float_to_char <<<DimGrid1, DimBlock1>>> (deviceInputImageData, deviceCharData, imageWidth*imageHeight*imageChannels);
-    cudaDeviceSynchronize();
-
-    cudaMemcpy(hostCharData, deviceCharData, imageWidth*imageHeight*imageChannels*sizeof(unsigned char), cudaMemcpyDeviceToHost);
-
-    cudaFree(deviceInputImageData);
-    cudaFree(deviceCharData);
-
-    wbTime_stop(Generic, "Converting image from float to unsigned char");
-}
-
-void Compressor::rgb_to_ycbcr(unsigned char* hostCharData, unsigned char* hostYCbCrData) {
-    wbTime_start(Generic, "Converting image from float to unsigned char");
-
-
-    wbTime_stop(Generic, "Converting image from float to unsigned char");
-}
-
-//std::ofstream outputFile;
-//void write_one_byte(unsigned char byte) { outputFile << byte; };
 
 std::vector<unsigned char> outputData;
 void write_one_byte(unsigned char byte) { outputData.push_back(byte); };
