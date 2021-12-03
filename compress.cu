@@ -5,6 +5,9 @@
 #define pi 3.14159265f
 #define sqrt1_2 0.707106781f
 
+using T_Quant = int;
+//using T_Quant = int16_t;
+
 #define ERROR(MSG) {fprintf(stderr, MSG "\n"); exit(1);}
 
 #define wbCheck(stmt)                                                     \
@@ -82,7 +85,7 @@ __global__ void kernel_block_dct(const float* inputData, float* outputData, cons
 
 
 //Call this once for each channel
-__global__ void kernel_quantize_dct_output(const float* inputData, int* outputData, const uint8_t* Q, uint width, uint height)
+__global__ void kernel_quantize_dct_output(const float* inputData, T_Quant* outputData, const uint8_t* Q, uint width, uint height)
 {
     assert(blockDim.x == 8);
     assert(blockDim.y == 8);
@@ -94,10 +97,10 @@ __global__ void kernel_quantize_dct_output(const float* inputData, int* outputDa
     size_t j = j_block * 8 + j_tile;
     if (i >= width || j >= height) return;
 
-    outputData[j * width + i] = (int) round(inputData[j * width + i] / Q[j_tile*8 + i_tile]);
+    outputData[j * width + i] = (T_Quant) round(inputData[j * width + i] / Q[j_tile*8 + i_tile]);
 }
 
-__global__ void kernel_zigzag(const int* inputData, int* outputData, const uint8_t* zigzag_map, uint width, uint height) {
+__global__ void kernel_zigzag(const int* inputData, T_Quant* outputData, const uint8_t* zigzag_map, uint width, uint height) {
     assert(blockDim.x == 8);
     assert(blockDim.y == 8);
 
@@ -372,7 +375,7 @@ private:
     DevicePtr<uint8_t> Q_c_device;
     DevicePtr<uint8_t> zigzag_map_device;
 
-    std::vector<vector<int>> RearrangedData; 
+    std::vector<vector<T_Quant>> RearrangedData;
 
     void float_to_char(unsigned char* hostCharData);
     void rgb_to_ycbcr(unsigned char* hostCharData, unsigned char* hostYCbCrData);
@@ -531,7 +534,7 @@ void Compressor::write_file() {
             for (auto c = 0; c < imageChannels; c++) {
 
                 auto it = RearrangedData[c].begin() + block_num*64;
-                std::vector<int> block64(it, it + 64);
+                std::vector<T_Quant> block64(it, it + 64);
 
                 BitCode* huffman = (c == 0) ? huffmanLuminanceDC : huffmanChrominanceDC;
                 
@@ -640,9 +643,9 @@ void Compressor::sequential_compress() {
 
     // quantization
     std::unique_ptr<int[]> 
-        YQData(new int[numPix]), 
-        CbQData(new int[numPix]), 
-        CrQData(new int[numPix]);
+        YQData(new T_Quant[numPix]),
+        CbQData(new T_Quant[numPix]),
+        CrQData(new T_Quant[numPix]);
 
     for (size_t j_block = 0; j_block < imageHeight/8; j_block++) {
         for (size_t i_block = 0; i_block < imageWidth/8; i_block++) {
@@ -652,9 +655,9 @@ void Compressor::sequential_compress() {
                     size_t i = i_block * 8 + i_tile;
                     size_t j = j_block * 8 + j_tile;
 
-                    YQData [j * imageWidth + i] = (int) round(YDctData [j * imageWidth + i] / Q_l[j_tile][i_tile]);
-                    CbQData[j * imageWidth + i] = (int) round(CbDctData[j * imageWidth + i] / Q_c[j_tile][i_tile]);
-                    CrQData[j * imageWidth + i] = (int) round(CrDctData[j * imageWidth + i] / Q_c[j_tile][i_tile]);   
+                    YQData [j * imageWidth + i] = (T_Quant) round(YDctData [j * imageWidth + i] / Q_l[j_tile][i_tile]);
+                    CbQData[j * imageWidth + i] = (T_Quant) round(CbDctData[j * imageWidth + i] / Q_c[j_tile][i_tile]);
+                    CrQData[j * imageWidth + i] = (T_Quant) round(CrDctData[j * imageWidth + i] / Q_c[j_tile][i_tile]);
                 }
             }
         }
@@ -741,8 +744,8 @@ void Compressor::parallel_compress() {
     DevicePtr<float> deviceRGBImageData(numEl);
     DevicePtr<float> deviceYCbCrImageData(numEl);
     DevicePtr<float> deviceDCTData(numEl);
-    DevicePtr<int> deviceQuantData(numEl);
-    DevicePtr<int> deviceZigzagData(numEl); //TODO should be int16
+    DevicePtr<T_Quant> deviceQuantData(numEl);
+    DevicePtr<T_Quant> deviceZigzagData(numEl);
     //DevicePtr<int16_t> deviceDcCoeffDiffs(numBlocks * 3);
 
     wbCheck(cudaMemcpy(deviceRGBImageData.get(), hostInputImageData, numEl*sizeof(float), cudaMemcpyHostToDevice));
@@ -771,9 +774,9 @@ void Compressor::parallel_compress() {
 
     wbCheck(cudaDeviceSynchronize());
 
-    int* deviceYQuant = deviceQuantData.get();
-    int* deviceCbQuant = deviceYQuant + numPix;
-    int* deviceCrQuant = deviceCbQuant + numPix;
+    T_Quant* deviceYQuant = deviceQuantData.get();
+    T_Quant* deviceCbQuant = deviceYQuant + numPix;
+    T_Quant* deviceCrQuant = deviceCbQuant + numPix;
 
     kernel_quantize_dct_output<<<DimGrid2, DimBlock2>>>(deviceYDCT,  deviceYQuant,  Q_l_device.get(), imageWidth, imageHeight);
     kernel_quantize_dct_output<<<DimGrid2, DimBlock2>>>(deviceCbDCT, deviceCbQuant, Q_c_device.get(), imageWidth, imageHeight);
@@ -781,9 +784,9 @@ void Compressor::parallel_compress() {
 
     wbCheck(cudaDeviceSynchronize());
 
-    int* deviceYZigzag = deviceZigzagData.get();
-    int* deviceCbZigzag = deviceYZigzag + numPix;
-    int* deviceCrZigzag = deviceCbZigzag + numPix;
+    T_Quant* deviceYZigzag = deviceZigzagData.get();
+    T_Quant* deviceCbZigzag = deviceYZigzag + numPix;
+    T_Quant* deviceCrZigzag = deviceCbZigzag + numPix;
 
     kernel_zigzag << <DimGrid2, DimBlock2 >> > (deviceYQuant,  deviceYZigzag,  zigzag_map_device.get(), imageWidth, imageHeight);
     kernel_zigzag << <DimGrid2, DimBlock2 >> > (deviceCbQuant, deviceCbZigzag, zigzag_map_device.get(), imageWidth, imageHeight);
