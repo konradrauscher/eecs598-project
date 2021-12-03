@@ -1,12 +1,16 @@
 #include <wb.h>
 #include <memory>
 #include <fstream>
+#include <functional>
 
 #define pi 3.14159265f
 #define sqrt1_2 0.707106781f
 
 using T_Quant = int;
 //using T_Quant = int16_t;
+
+
+using WRITE_ONE_BYTE = std::function<void(unsigned char)>;
 
 #define ERROR(MSG) {fprintf(stderr, MSG "\n"); exit(1);}
 
@@ -154,7 +158,6 @@ struct BitCode
   uint8_t  numBits;    // number of valid bits
 };
 
-typedef void (*WRITE_ONE_BYTE)(unsigned char);
 
 // wrapper for bit output operations
 struct BitWriter
@@ -229,97 +232,97 @@ struct BitWriter
     output(uint8_t(length & 0xFF));
   }
 };
-
+// Discrete cosine transform lookup: cos((2i+1)jpi/16) = dct[i][j]
+static const float dct[8][8] = {
+    { 1.00000000,  0.98076987,  0.92381907,  0.83133787,  0.70688325,  0.55524170,  0.38224527,  0.19454771 },	
+    { 1.00000000,  0.83133787,  0.38224527, -0.19578782, -0.70777708, -0.98101586, -0.92333424, -0.55418950 },
+    { 1.00000000,  0.55524170, -0.38341337, -0.98101586, -0.70598841,  0.19702761,  0.92478424,  0.82992971 },
+    { 1.00000000,  0.19454771, -0.92430240, -0.55418950,  0.70866978,  0.82992971, -0.38574794, -0.98002243 },
+    { 1.00000000, -0.19578782, -0.92333424,  0.55734301,  0.70509231, -0.83344024, -0.37873754,  0.98174447 },
+    { 1.00000000, -0.55629271, -0.38107678,  0.98027313, -0.70956099, -0.19082600,  0.92187083, -0.83483505 },
+    { 1.00000000, -0.83204001,  0.38458106,  0.19206657, -0.70419478,  0.97977030, -0.92622089,  0.56153554 },
+    { 1.00000000, -0.98101586,  0.92478424, -0.83344024,  0.71045172, -0.56048846,  0.38924527, -0.20322227 }
+};
+// Standard Quantization table for Luminance
+static const uint8_t Q_l[8][8] = {
+    { 16, 11, 10, 16, 24, 40, 51, 61 },
+    { 12, 12, 14, 19, 26, 58, 60, 55 },
+    { 14, 13, 16, 24, 40, 57, 69, 56 },
+    { 14, 17, 22, 29, 51, 87, 80, 62 },
+    { 18, 22, 37, 56, 68,109,103, 77 },
+    { 24, 35, 55, 64, 81,104,113, 92 },
+    { 49, 64, 78, 87,103,121,120,101 },
+    { 72, 92, 95, 98,112,100,103, 99 }
+};
+// Standard Quantization table for Chrominance
+static const uint8_t Q_c[8][8] = {
+    { 17, 18, 24, 47, 99, 99, 99, 99 },
+    { 18, 21, 26, 66, 99, 99, 99, 99 },
+    { 24, 26, 56, 99, 99, 99, 99, 99 },
+    { 47, 66, 99, 99, 99, 99, 99, 99 },
+    { 99, 99, 99, 99, 99, 99, 99, 99 },
+    { 99, 99, 99, 99, 99, 99, 99, 99 },
+    { 99, 99, 99, 99, 99, 99, 99, 99 },
+    { 99, 99, 99, 99, 99, 99, 99, 99 }
+};
+// Mapping of blocks to zigzag - defines the order of selection
+static const uint8_t zigzag_map[64] = {
+    0,  1,  5,  6,  14, 15, 27, 28,
+    2,  4,  7,  13, 16, 26, 29, 42,
+    3,  8,  12, 17, 25, 30, 41, 43,
+    9,  11, 18, 24, 31, 40, 44, 53,
+    10, 19, 23, 32, 39, 45, 52, 54,
+    20, 22, 33, 38, 46, 51, 55, 60,
+    21, 34, 37, 47, 50, 56, 59, 61,
+    35, 36, 48, 49, 57, 58, 62, 63  
+};
+// Mapping of order of quantization tables to be streamed into file
+static const uint8_t ZigZagInv[64] = {
+    0,  1,  8,  16, 9,  2,  3,  10,
+    17, 24, 32, 25, 18, 11, 4,  5,
+    12, 19, 26, 33, 40, 48, 41, 34,
+    27, 20, 13, 6,  7,  14, 21, 28,
+    35, 42, 49, 56, 57, 50, 43, 36,
+    29, 22, 15, 23, 30, 37, 44, 51,
+    58, 59, 52, 45, 38, 31, 39, 46,
+    53, 60, 61, 54, 47, 55, 62, 63 
+};
+// Huffman definitions for first DC/AC tables (luminance / Y channel)
+static const uint8_t DcLuminanceCodesPerBitsize[16]   = { 0,1,5,1,1,1,1,1,1,0,0,0,0,0,0,0 };   // sum = 12
+static const uint8_t DcLuminanceValues         [12]   = { 0,1,2,3,4,5,6,7,8,9,10,11 };         // => 12 codes
+static const uint8_t AcLuminanceCodesPerBitsize[16]   = { 0,2,1,3,3,2,4,3,5,5,4,4,0,0,1,125 }; // sum = 162
+static  const uint8_t AcLuminanceValues        [162]   =                                        // => 162 codes
+{ 0x01,0x02,0x03,0x00,0x04,0x11,0x05,0x12,0x21,0x31,0x41,0x06,0x13,0x51,0x61,0x07,0x22,0x71,0x14,0x32,0x81,0x91,0xA1,0x08, // 16*10+2 symbols because
+    0x23,0x42,0xB1,0xC1,0x15,0x52,0xD1,0xF0,0x24,0x33,0x62,0x72,0x82,0x09,0x0A,0x16,0x17,0x18,0x19,0x1A,0x25,0x26,0x27,0x28, // upper 4 bits can be 0..F
+    0x29,0x2A,0x34,0x35,0x36,0x37,0x38,0x39,0x3A,0x43,0x44,0x45,0x46,0x47,0x48,0x49,0x4A,0x53,0x54,0x55,0x56,0x57,0x58,0x59, // while lower 4 bits can be 1..A
+    0x5A,0x63,0x64,0x65,0x66,0x67,0x68,0x69,0x6A,0x73,0x74,0x75,0x76,0x77,0x78,0x79,0x7A,0x83,0x84,0x85,0x86,0x87,0x88,0x89, // plus two special codes 0x00 and 0xF0
+    0x8A,0x92,0x93,0x94,0x95,0x96,0x97,0x98,0x99,0x9A,0xA2,0xA3,0xA4,0xA5,0xA6,0xA7,0xA8,0xA9,0xAA,0xB2,0xB3,0xB4,0xB5,0xB6, // order of these symbols was determined empirically by JPEG committee
+    0xB7,0xB8,0xB9,0xBA,0xC2,0xC3,0xC4,0xC5,0xC6,0xC7,0xC8,0xC9,0xCA,0xD2,0xD3,0xD4,0xD5,0xD6,0xD7,0xD8,0xD9,0xDA,0xE1,0xE2,
+    0xE3,0xE4,0xE5,0xE6,0xE7,0xE8,0xE9,0xEA,0xF1,0xF2,0xF3,0xF4,0xF5,0xF6,0xF7,0xF8,0xF9,0xFA 
+};
+// Huffman definitions for second DC/AC tables (chrominance / Cb and Cr channels)
+static const uint8_t DcChrominanceCodesPerBitsize[16] = { 0,3,1,1,1,1,1,1,1,1,1,0,0,0,0,0 };   // sum = 12
+static const uint8_t DcChrominanceValues         [12] = { 0,1,2,3,4,5,6,7,8,9,10,11 };         // => 12 codes (identical to DcLuminanceValues)
+static const uint8_t AcChrominanceCodesPerBitsize[16] = { 0,2,1,2,4,4,3,4,7,5,4,4,0,1,2,119 }; // sum = 162
+static const uint8_t AcChrominanceValues        [162] =                                        // => 162 codes
+{ 0x00,0x01,0x02,0x03,0x11,0x04,0x05,0x21,0x31,0x06,0x12,0x41,0x51,0x07,0x61,0x71,0x13,0x22,0x32,0x81,0x08,0x14,0x42,0x91, // same number of symbol, just different order
+    0xA1,0xB1,0xC1,0x09,0x23,0x33,0x52,0xF0,0x15,0x62,0x72,0xD1,0x0A,0x16,0x24,0x34,0xE1,0x25,0xF1,0x17,0x18,0x19,0x1A,0x26, // (which is more efficient for AC coding)
+    0x27,0x28,0x29,0x2A,0x35,0x36,0x37,0x38,0x39,0x3A,0x43,0x44,0x45,0x46,0x47,0x48,0x49,0x4A,0x53,0x54,0x55,0x56,0x57,0x58,
+    0x59,0x5A,0x63,0x64,0x65,0x66,0x67,0x68,0x69,0x6A,0x73,0x74,0x75,0x76,0x77,0x78,0x79,0x7A,0x82,0x83,0x84,0x85,0x86,0x87,
+    0x88,0x89,0x8A,0x92,0x93,0x94,0x95,0x96,0x97,0x98,0x99,0x9A,0xA2,0xA3,0xA4,0xA5,0xA6,0xA7,0xA8,0xA9,0xAA,0xB2,0xB3,0xB4,
+    0xB5,0xB6,0xB7,0xB8,0xB9,0xBA,0xC2,0xC3,0xC4,0xC5,0xC6,0xC7,0xC8,0xC9,0xCA,0xD2,0xD3,0xD4,0xD5,0xD6,0xD7,0xD8,0xD9,0xDA,
+    0xE2,0xE3,0xE4,0xE5,0xE6,0xE7,0xE8,0xE9,0xEA,0xF2,0xF3,0xF4,0xF5,0xF6,0xF7,0xF8,0xF9,0xFA 
+};
 class Compressor {
 private:
     const char* inputImageFile;
     wbImage_t inputImage;
     BitWriter bitWriter;
-    uint16_t imageWidth;
-    uint16_t imageHeight;
-    uint8_t imageChannels;
+    uint32_t imageWidth;
+    uint32_t imageHeight;
+    uint32_t imageChannels;
     float* hostInputImageData;
-    // Discrete cosine transform lookup: cos((2i+1)jpi/16) = dct[i][j]
-    const float dct[8][8] = {
-        { 1.00000000,  0.98076987,  0.92381907,  0.83133787,  0.70688325,  0.55524170,  0.38224527,  0.19454771 },	
-        { 1.00000000,  0.83133787,  0.38224527, -0.19578782, -0.70777708, -0.98101586, -0.92333424, -0.55418950 },
-        { 1.00000000,  0.55524170, -0.38341337, -0.98101586, -0.70598841,  0.19702761,  0.92478424,  0.82992971 },
-        { 1.00000000,  0.19454771, -0.92430240, -0.55418950,  0.70866978,  0.82992971, -0.38574794, -0.98002243 },
-        { 1.00000000, -0.19578782, -0.92333424,  0.55734301,  0.70509231, -0.83344024, -0.37873754,  0.98174447 },
-        { 1.00000000, -0.55629271, -0.38107678,  0.98027313, -0.70956099, -0.19082600,  0.92187083, -0.83483505 },
-        { 1.00000000, -0.83204001,  0.38458106,  0.19206657, -0.70419478,  0.97977030, -0.92622089,  0.56153554 },
-        { 1.00000000, -0.98101586,  0.92478424, -0.83344024,  0.71045172, -0.56048846,  0.38924527, -0.20322227 }
-    };
-    // Standard Quantization table for Luminance
-    const uint8_t Q_l[8][8] = {
-        { 16, 11, 10, 16, 24, 40, 51, 61 },
-        { 12, 12, 14, 19, 26, 58, 60, 55 },
-        { 14, 13, 16, 24, 40, 57, 69, 56 },
-        { 14, 17, 22, 29, 51, 87, 80, 62 },
-        { 18, 22, 37, 56, 68,109,103, 77 },
-        { 24, 35, 55, 64, 81,104,113, 92 },
-        { 49, 64, 78, 87,103,121,120,101 },
-        { 72, 92, 95, 98,112,100,103, 99 }
-    };
-    // Standard Quantization table for Chrominance
-    const uint8_t Q_c[8][8] = {
-        { 17, 18, 24, 47, 99, 99, 99, 99 },
-        { 18, 21, 26, 66, 99, 99, 99, 99 },
-        { 24, 26, 56, 99, 99, 99, 99, 99 },
-        { 47, 66, 99, 99, 99, 99, 99, 99 },
-        { 99, 99, 99, 99, 99, 99, 99, 99 },
-        { 99, 99, 99, 99, 99, 99, 99, 99 },
-        { 99, 99, 99, 99, 99, 99, 99, 99 },
-        { 99, 99, 99, 99, 99, 99, 99, 99 }
-    };
-    // Mapping of blocks to zigzag - defines the order of selection
-    const uint8_t zigzag_map[64] = {  
-        0,  1,  5,  6,  14, 15, 27, 28,
-        2,  4,  7,  13, 16, 26, 29, 42,
-        3,  8,  12, 17, 25, 30, 41, 43,
-        9,  11, 18, 24, 31, 40, 44, 53,
-        10, 19, 23, 32, 39, 45, 52, 54,
-        20, 22, 33, 38, 46, 51, 55, 60,
-        21, 34, 37, 47, 50, 56, 59, 61,
-        35, 36, 48, 49, 57, 58, 62, 63  
-    };
-    // Mapping of order of quantization tables to be streamed into file
-    const uint8_t ZigZagInv[64] = {  
-        0,  1,  8,  16, 9,  2,  3,  10,
-        17, 24, 32, 25, 18, 11, 4,  5,
-        12, 19, 26, 33, 40, 48, 41, 34,
-        27, 20, 13, 6,  7,  14, 21, 28,
-        35, 42, 49, 56, 57, 50, 43, 36,
-        29, 22, 15, 23, 30, 37, 44, 51,
-        58, 59, 52, 45, 38, 31, 39, 46,
-        53, 60, 61, 54, 47, 55, 62, 63 
-    };
-    // Huffman definitions for first DC/AC tables (luminance / Y channel)
-    const uint8_t DcLuminanceCodesPerBitsize[16]   = { 0,1,5,1,1,1,1,1,1,0,0,0,0,0,0,0 };   // sum = 12
-    const uint8_t DcLuminanceValues         [12]   = { 0,1,2,3,4,5,6,7,8,9,10,11 };         // => 12 codes
-    const uint8_t AcLuminanceCodesPerBitsize[16]   = { 0,2,1,3,3,2,4,3,5,5,4,4,0,0,1,125 }; // sum = 162
-    const uint8_t AcLuminanceValues        [162]   =                                        // => 162 codes
-    { 0x01,0x02,0x03,0x00,0x04,0x11,0x05,0x12,0x21,0x31,0x41,0x06,0x13,0x51,0x61,0x07,0x22,0x71,0x14,0x32,0x81,0x91,0xA1,0x08, // 16*10+2 symbols because
-      0x23,0x42,0xB1,0xC1,0x15,0x52,0xD1,0xF0,0x24,0x33,0x62,0x72,0x82,0x09,0x0A,0x16,0x17,0x18,0x19,0x1A,0x25,0x26,0x27,0x28, // upper 4 bits can be 0..F
-      0x29,0x2A,0x34,0x35,0x36,0x37,0x38,0x39,0x3A,0x43,0x44,0x45,0x46,0x47,0x48,0x49,0x4A,0x53,0x54,0x55,0x56,0x57,0x58,0x59, // while lower 4 bits can be 1..A
-      0x5A,0x63,0x64,0x65,0x66,0x67,0x68,0x69,0x6A,0x73,0x74,0x75,0x76,0x77,0x78,0x79,0x7A,0x83,0x84,0x85,0x86,0x87,0x88,0x89, // plus two special codes 0x00 and 0xF0
-      0x8A,0x92,0x93,0x94,0x95,0x96,0x97,0x98,0x99,0x9A,0xA2,0xA3,0xA4,0xA5,0xA6,0xA7,0xA8,0xA9,0xAA,0xB2,0xB3,0xB4,0xB5,0xB6, // order of these symbols was determined empirically by JPEG committee
-      0xB7,0xB8,0xB9,0xBA,0xC2,0xC3,0xC4,0xC5,0xC6,0xC7,0xC8,0xC9,0xCA,0xD2,0xD3,0xD4,0xD5,0xD6,0xD7,0xD8,0xD9,0xDA,0xE1,0xE2,
-      0xE3,0xE4,0xE5,0xE6,0xE7,0xE8,0xE9,0xEA,0xF1,0xF2,0xF3,0xF4,0xF5,0xF6,0xF7,0xF8,0xF9,0xFA 
-    };
-    // Huffman definitions for second DC/AC tables (chrominance / Cb and Cr channels)
-    const uint8_t DcChrominanceCodesPerBitsize[16] = { 0,3,1,1,1,1,1,1,1,1,1,0,0,0,0,0 };   // sum = 12
-    const uint8_t DcChrominanceValues         [12] = { 0,1,2,3,4,5,6,7,8,9,10,11 };         // => 12 codes (identical to DcLuminanceValues)
-    const uint8_t AcChrominanceCodesPerBitsize[16] = { 0,2,1,2,4,4,3,4,7,5,4,4,0,1,2,119 }; // sum = 162
-    const uint8_t AcChrominanceValues        [162] =                                        // => 162 codes
-    { 0x00,0x01,0x02,0x03,0x11,0x04,0x05,0x21,0x31,0x06,0x12,0x41,0x51,0x07,0x61,0x71,0x13,0x22,0x32,0x81,0x08,0x14,0x42,0x91, // same number of symbol, just different order
-      0xA1,0xB1,0xC1,0x09,0x23,0x33,0x52,0xF0,0x15,0x62,0x72,0xD1,0x0A,0x16,0x24,0x34,0xE1,0x25,0xF1,0x17,0x18,0x19,0x1A,0x26, // (which is more efficient for AC coding)
-      0x27,0x28,0x29,0x2A,0x35,0x36,0x37,0x38,0x39,0x3A,0x43,0x44,0x45,0x46,0x47,0x48,0x49,0x4A,0x53,0x54,0x55,0x56,0x57,0x58,
-      0x59,0x5A,0x63,0x64,0x65,0x66,0x67,0x68,0x69,0x6A,0x73,0x74,0x75,0x76,0x77,0x78,0x79,0x7A,0x82,0x83,0x84,0x85,0x86,0x87,
-      0x88,0x89,0x8A,0x92,0x93,0x94,0x95,0x96,0x97,0x98,0x99,0x9A,0xA2,0xA3,0xA4,0xA5,0xA6,0xA7,0xA8,0xA9,0xAA,0xB2,0xB3,0xB4,
-      0xB5,0xB6,0xB7,0xB8,0xB9,0xBA,0xC2,0xC3,0xC4,0xC5,0xC6,0xC7,0xC8,0xC9,0xCA,0xD2,0xD3,0xD4,0xD5,0xD6,0xD7,0xD8,0xD9,0xDA,
-      0xE2,0xE3,0xE4,0xE5,0xE6,0xE7,0xE8,0xE9,0xEA,0xF2,0xF3,0xF4,0xF5,0xF6,0xF7,0xF8,0xF9,0xFA 
-    };
+    
     // Huffman tables for lookup during encoding
     BitCode  codewordsArray[4096];     // note: quantized[i] is found at codewordsArray[quantized[i] + CodeWordLimit]
     BitCode* codewords;
@@ -333,17 +336,20 @@ private:
     DevicePtr<uint8_t> Q_c_device;
     DevicePtr<uint8_t> zigzag_map_device;
 
-    std::vector<vector<T_Quant>> RearrangedData;
+    std::vector<T_Quant*> rearrangedData;
+    std::unique_ptr<T_Quant[]> rearrangedBuf;
 
-    void sequential_dct(float* inputData, float* outputData, int width, int height);
+    void init_codewords();
+    void sequential_dct(const float* inputData, float* outputData, int width, int height);
     void write_file();
     void generateHuffmanTable(const uint8_t numCodes[16], const uint8_t* values, BitCode result[256]);
 
 public:
     Compressor(wbArg_t args, WRITE_ONE_BYTE _output);
     ~Compressor();
-    void sequential_compress();
-    void parallel_compress();
+    void sequential_compress_slice(const float* inputData, T_Quant* outputData[3], size_t numLines);
+    void parallel_compress_slice(const float* inputData, T_Quant* outputData[3], size_t numLines);
+    void compress(bool parallel);
     size_t getNumPixels() const {
         return (size_t)imageWidth * (size_t)imageHeight;
     }
@@ -365,26 +371,19 @@ Compressor::Compressor(wbArg_t args, WRITE_ONE_BYTE _output)
     hostInputImageData = wbImage_getData(inputImage);
     wbTime_stop(Generic, "Importing data and creating memory on host");
 
+    if (imageChannels != 3) ERROR("Image must have three channels");
+
+    rearrangedBuf.reset(new T_Quant[imageWidth*imageHeight*imageChannels]);
+    for (uint32_t ii = 0; ii < imageChannels; ++ii) {
+        rearrangedData.push_back(rearrangedBuf.get() + ii * imageWidth * imageHeight);
+    }
+
     generateHuffmanTable(DcLuminanceCodesPerBitsize,   DcLuminanceValues,   huffmanLuminanceDC);
     generateHuffmanTable(AcLuminanceCodesPerBitsize,   AcLuminanceValues,   huffmanLuminanceAC);
     generateHuffmanTable(DcChrominanceCodesPerBitsize, DcChrominanceValues, huffmanChrominanceDC);
     generateHuffmanTable(AcChrominanceCodesPerBitsize, AcChrominanceValues, huffmanChrominanceAC);
 
-    codewords = &codewordsArray[2048]; // allow negative indices, so quantized[i] is at codewords[quantized[i]]
-    uint8_t numBits = 1; // each codeword has at least one bit (value == 0 is undefined)
-    int32_t mask    = 1; // mask is always 2^numBits - 1, initial value 2^1-1 = 2-1 = 1
-    for (int16_t value = 1; value < 2048; value++)
-    {
-        // numBits = position of highest set bit (ignoring the sign)
-        // mask    = (2^numBits) - 1
-        if (value > mask) // one more bit ?
-        {
-        numBits++;
-        mask = (mask << 1) | 1; // append a set bit
-        }
-        codewords[-value] = BitCode(mask - value, numBits); // note that I use a negative index => codewords[-value] = codewordsArray[CodeWordLimit  value]
-        codewords[+value] = BitCode(       value, numBits);
-    }
+    init_codewords();
 
     wbCheck(cudaMemcpy(dct_device.get(), dct, sizeof(dct), cudaMemcpyHostToDevice));
     wbCheck(cudaMemcpy(Q_l_device.get(), Q_l, sizeof(Q_l), cudaMemcpyHostToDevice));
@@ -394,158 +393,31 @@ Compressor::Compressor(wbArg_t args, WRITE_ONE_BYTE _output)
     printf("Input image size: %dx%dx%d\n", imageWidth, imageHeight, imageChannels);
 }
 
+void Compressor::init_codewords() {
+    codewords = &codewordsArray[2048]; // allow negative indices, so quantized[i] is at codewords[quantized[i]]
+    uint8_t numBits = 1; // each codeword has at least one bit (value == 0 is undefined)
+    int32_t mask = 1; // mask is always 2^numBits - 1, initial value 2^1-1 = 2-1 = 1
+    for (int16_t value = 1; value < 2048; value++) {
+        // numBits = position of highest set bit (ignoring the sign)
+        // mask    = (2^numBits) - 1
+        if (value > mask) // one more bit ?
+        {
+            numBits++;
+            mask = (mask << 1) | 1; // append a set bit
+        }
+        codewords[-value] = BitCode(mask - value, numBits); // note that I use a negative index => codewords[-value] = codewordsArray[CodeWordLimit  value]
+        codewords[+value] = BitCode(value, numBits);
+    }
+}
+
 Compressor::~Compressor() {
     wbImage_delete(inputImage);
 }
 
-void Compressor::write_file() {   
-    if((size_t)imageWidth*(size_t)imageHeight <= 1024){
-        for(size_t ii = 0, idx = 0; ii < imageHeight; ++ii){
-            for(size_t jj = 0; jj < imageWidth; ++jj, ++idx){
-                printf("%4d %4d %4d          ",
-                    (int)RearrangedData[0][idx],
-                    (int)RearrangedData[1][idx],
-                    (int)RearrangedData[2][idx]);
-            }
-        printf("\n\n");
-        }
-    }
-    
-    const uint8_t HeaderJfif[2+2+16] = { 
-        0xFF,0xD8,          // SOI marker (start of image)
-        0xFF,0xE0,          // JFIF APP0 tag
-        0,16,               // length: 16 bytes (14 bytes payload + 2 bytes for this length field)
-        'J','F','I','F',0,  // JFIF identifier, zero-terminated
-        1,1,                // JFIF version 1.1
-        0,                  // no density units specified
-        0,1,0,1,            // density: 1 pixel "per pixel" horizontally and vertically
-        0,0                 // no thumbnail (size 0 x 0) 
-    };   
-    const char comment[23] = "EECS598 Project Output";
+void Compressor::compress(bool parallel) {
+    auto compress_func = parallel ? this->parallel_compress_slice : this->sequential_compress_slice;
 
-    // JFIF Header
-    bitWriter << HeaderJfif;
-
-    // Comment
-    bitWriter.addMarker(0xFE, 24);
-    for (auto i = 0; i < 22; i++) { 
-        bitWriter << comment[i];
-    }
-
-    // Quantization Tables
-    bitWriter.addMarker(0xDB, 2 + 2*(1 + 8*8));
-    bitWriter   << 0x00;
-    for (auto i = 0; i < 64; i++) {
-        auto y = ZigZagInv[i] / 8;
-        auto x = ZigZagInv[i] % 8;
-        bitWriter << Q_l[y][x];
-    }
-    bitWriter   << 0x01;
-    for (auto i = 0; i < 64; i++) {
-        auto y = ZigZagInv[i] / 8;
-        auto x = ZigZagInv[i] % 8;
-        bitWriter << Q_c[y][x];
-    }
-
-    // Bits/Pixel, Image Size, Number of Channels, and Subsampling and Y vs C for each channel
-    bitWriter.addMarker(0xC0, 2+6+3*3);
-    bitWriter   << 0x08 
-                << (imageHeight >> 8) << (imageHeight & 0xFF)
-                << (imageWidth  >> 8) << (imageWidth  & 0xFF)
-                << 0x03
-                << 0x01 << 0x11 << 0x00
-                << 0x02 << 0x11 << 0x01
-                << 0x03 << 0x11 << 0x01;
-
-    // Huffman Tables
-    bitWriter.addMarker(0xC4, 2+208+208);
-    bitWriter   << 0x00 << DcLuminanceCodesPerBitsize   << DcLuminanceValues
-                << 0x10 << AcLuminanceCodesPerBitsize   << AcLuminanceValues
-                << 0x01 << DcChrominanceCodesPerBitsize << DcChrominanceValues
-                << 0x11 << AcChrominanceCodesPerBitsize << AcChrominanceValues;
-
-    // Start of Scan
-    bitWriter.addMarker(0xDA, 2+1+2*3+3);
-
-    // Number of Channels and Channel map to Huffman Tables
-    bitWriter   << 0x03
-                << 0x01 << 0x00
-                << 0x02 << 0x11
-                << 0x03 << 0x11;
-
-    // Spectral Selection - Single Scan
-    bitWriter << 0x00 << 0x3F << 0x00;
-
-    // TODO: Image Data
-    // TODO: entropy coding
-    int16_t lastYDC  = 0;
-    int16_t lastCbDC = 0;
-    int16_t lastCrDC = 0;
-
-    for (auto j_block = 0; j_block < imageHeight/8; j_block++) {
-        for (auto i_block = 0; i_block < imageWidth/8; i_block++) {
-
-            auto block_num = j_block * imageWidth/8 + i_block;
-
-            for (auto c = 0; c < imageChannels; c++) {
-
-                auto it = RearrangedData[c].begin() + block_num*64;
-                std::vector<T_Quant> block64(it, it + 64);
-
-                BitCode* huffman = (c == 0) ? huffmanLuminanceDC : huffmanChrominanceDC;
-                
-                int16_t lastDC;
-                if      (c == 0) { lastDC = lastYDC;  lastYDC  = block64[0]; }
-                else if (c == 1) { lastDC = lastCbDC; lastCbDC = block64[0]; }
-                else             { lastDC = lastCrDC; lastCrDC = block64[0]; }
-
-                auto diff = block64[0] - lastDC;
-                if (diff == 0) {
-                    bitWriter << huffman[0x00];
-                }
-                else {
-                    auto bits = codewords[diff];
-                    bitWriter << huffman[bits.numBits] << bits;
-                }
-
-                huffman = (c == 0) ? huffmanLuminanceAC : huffmanChrominanceAC;
-
-                // find last non-zero value in block
-                auto posNonZero = 0;
-                for (auto i = 1; i < 64; i++) {
-                    if (block64[i] != 0) posNonZero = i;
-                }
-
-                auto offset = 0;
-                for (auto i = 1; i <= posNonZero; i++) {
-                    // cound the preceding zeros before a nonzero value
-                    while (block64[i] == 0) {
-                        offset += 0x10;
-                        // write a special symbol for 16 zeros and reset count
-                        if (offset > 0xF0) {
-                            bitWriter << huffman[0xF0];
-                            offset = 0;
-                        }
-                        i++;
-                    }
-
-                    auto encoded = codewords[block64[i]];
-
-                    // combine the run with the size of the symbol
-                    bitWriter << huffman[offset + encoded.numBits] << encoded;
-                    offset = 0;
-                }
-
-                // Write an EOB if the remaining values are zero
-                if (posNonZero < 63) bitWriter << huffman[0x00];
-            }
-        }
-    }
-
-    bitWriter.flush();
-    // End of Image
-
-    bitWriter << 0xFF << 0xD9;
+    compress_func(hostInputImageData, rearrangedData.data(), imageHeight);
 }
 
 void Compressor::generateHuffmanTable(const uint8_t numCodes[16], const uint8_t* values, BitCode result[256])
@@ -563,9 +435,9 @@ void Compressor::generateHuffmanTable(const uint8_t numCodes[16], const uint8_t*
   }
 }
 
-void Compressor::sequential_compress() {
+void Compressor::sequential_compress_slice(const float* inputData, T_Quant* outputData[3], size_t numLines) {
 
-    size_t numPix = imageWidth*imageHeight;
+    size_t numPix = imageWidth * numLines;
 
     // convert from RGB floats to YCbCr in separate channels
     std::unique_ptr<float[]> 
@@ -573,7 +445,7 @@ void Compressor::sequential_compress() {
         CbData(new float[numPix]),
         CrData(new float[numPix]);
 
-    for (size_t i = 0; i < imageWidth*imageHeight; i++) {
+    for (size_t i = 0; i < numPix; i++) {
 
         unsigned char r = (unsigned char) (255 * hostInputImageData[3*i + 0]);
         unsigned char g = (unsigned char) (255 * hostInputImageData[3*i + 1]);
@@ -593,9 +465,9 @@ void Compressor::sequential_compress() {
         CbDctData(new float[numPix]),
         CrDctData(new float[numPix]);
 
-    sequential_dct(YData.get(),  YDctData.get(),  imageWidth, imageHeight);
-    sequential_dct(CbData.get(), CbDctData.get(), imageWidth, imageHeight);
-    sequential_dct(CrData.get(), CrDctData.get(), imageWidth, imageHeight);
+    sequential_dct(YData.get(),  YDctData.get(),  imageWidth, numLines);
+    sequential_dct(CbData.get(), CbDctData.get(), imageWidth, numLines);
+    sequential_dct(CrData.get(), CrDctData.get(), imageWidth, numLines);
 
     // quantization
     std::unique_ptr<int[]> 
@@ -603,7 +475,7 @@ void Compressor::sequential_compress() {
         CbQData(new T_Quant[numPix]),
         CrQData(new T_Quant[numPix]);
 
-    for (size_t j_block = 0; j_block < imageHeight/8; j_block++) {
+    for (size_t j_block = 0; j_block < numLines /8; j_block++) {
         for (size_t i_block = 0; i_block < imageWidth/8; i_block++) {
             for (size_t j_tile = 0; j_tile < 8; j_tile++) {
                 for (size_t i_tile = 0; i_tile < 8; i_tile++) {
@@ -620,12 +492,8 @@ void Compressor::sequential_compress() {
     }
 
     // zigzag rearrange
-    RearrangedData.resize(3);
-    for (auto i = 0; i < 3; i++) {
-        RearrangedData[i].resize(numPix);
-    }
 
-    for (size_t j_block = 0; j_block < imageHeight/8; j_block++) {
+    for (size_t j_block = 0; j_block < numLines/8; j_block++) {
         for (size_t i_block = 0; i_block < imageWidth/8; i_block++) {
 
             size_t block_num = j_block * imageWidth/8 + i_block;
@@ -638,20 +506,20 @@ void Compressor::sequential_compress() {
                     size_t x = i_block * 8 + i_tile;
                     size_t y = j_block * 8 + j_tile;
 
-                    RearrangedData[0][block_num * 64 + zigzag_map[tile_num]] = YQData [y * imageWidth + x];
-                    RearrangedData[1][block_num * 64 + zigzag_map[tile_num]] = CbQData[y * imageWidth + x];
-                    RearrangedData[2][block_num * 64 + zigzag_map[tile_num]] = CrQData[y * imageWidth + x];
+                    outputData[0][block_num * 64 + zigzag_map[tile_num]] = YQData [y * imageWidth + x];
+                    outputData[1][block_num * 64 + zigzag_map[tile_num]] = CbQData[y * imageWidth + x];
+                    outputData[2][block_num * 64 + zigzag_map[tile_num]] = CrQData[y * imageWidth + x];
 
                 }
             }
         }
     }
 
-    // TODO: write file
+    // Encode and write file
     write_file();
 }
 
-void Compressor::sequential_dct(float* inputData, float* outputData, int width, int height) {
+void Compressor::sequential_dct(const float* inputData, float* outputData, int width, int height) {
     // loop over all 8x8 tiles
     for (size_t j_block = 0; j_block < height/8; j_block++) {
         for (size_t i_block = 0; i_block < width/8; i_block++) {
@@ -691,7 +559,7 @@ void Compressor::sequential_dct(float* inputData, float* outputData, int width, 
     }
 }
 
-void Compressor::parallel_compress() {
+void Compressor::parallel_compress_slice(const float* inputData, T_Quant* outputData[3], size_t numLines) {
 
     size_t numPix = imageWidth * imageHeight;
     size_t numEl = numPix * imageChannels;
@@ -749,30 +617,173 @@ void Compressor::parallel_compress() {
     wbCheck(cudaDeviceSynchronize());
 
 
-    RearrangedData.resize(3);
-    for (auto i = 0; i < 3; i++) {
-        RearrangedData[i].resize(numPix);
-    }
-
     size_t memcpySize = imageWidth * imageHeight * sizeof(*deviceYZigzag);
-    wbCheck(cudaMemcpy(RearrangedData[0].data(), deviceYZigzag, memcpySize, cudaMemcpyDeviceToHost));
-    wbCheck(cudaMemcpy(RearrangedData[1].data(), deviceCbZigzag, memcpySize, cudaMemcpyDeviceToHost));
-    wbCheck(cudaMemcpy(RearrangedData[2].data(), deviceCrZigzag, memcpySize, cudaMemcpyDeviceToHost));
+    wbCheck(cudaMemcpy(outputData[0], deviceYZigzag,  memcpySize, cudaMemcpyDeviceToHost));
+    wbCheck(cudaMemcpy(outputData[1], deviceCbZigzag, memcpySize, cudaMemcpyDeviceToHost));
+    wbCheck(cudaMemcpy(outputData[2], deviceCrZigzag, memcpySize, cudaMemcpyDeviceToHost));
 
 
     write_file();
 }
 
 
-std::vector<unsigned char> outputData;
-void write_one_byte(unsigned char byte) { outputData.push_back(byte); };
+void Compressor::write_file() {
+    if ((size_t)imageWidth * (size_t)imageHeight <= 1024) {
+        for (size_t ii = 0, idx = 0; ii < imageHeight; ++ii) {
+            for (size_t jj = 0; jj < imageWidth; ++jj, ++idx) {
+                printf("%4d %4d %4d          ",
+                    (int)rearrangedData[0][idx],
+                    (int)rearrangedData[1][idx],
+                    (int)rearrangedData[2][idx]);
+            }
+            printf("\n\n");
+        }
+    }
+
+    const uint8_t HeaderJfif[2 + 2 + 16] = {
+        0xFF,0xD8,          // SOI marker (start of image)
+        0xFF,0xE0,          // JFIF APP0 tag
+        0,16,               // length: 16 bytes (14 bytes payload + 2 bytes for this length field)
+        'J','F','I','F',0,  // JFIF identifier, zero-terminated
+        1,1,                // JFIF version 1.1
+        0,                  // no density units specified
+        0,1,0,1,            // density: 1 pixel "per pixel" horizontally and vertically
+        0,0                 // no thumbnail (size 0 x 0) 
+    };
+    const char comment[23] = "EECS598 Project Output";
+
+    // JFIF Header
+    bitWriter << HeaderJfif;
+
+    // Comment
+    bitWriter.addMarker(0xFE, 24);
+    for (auto i = 0; i < 22; i++) {
+        bitWriter << comment[i];
+    }
+
+    // Quantization Tables
+    bitWriter.addMarker(0xDB, 2 + 2 * (1 + 8 * 8));
+    bitWriter << 0x00;
+    for (auto i = 0; i < 64; i++) {
+        auto y = ZigZagInv[i] / 8;
+        auto x = ZigZagInv[i] % 8;
+        bitWriter << Q_l[y][x];
+    }
+    bitWriter << 0x01;
+    for (auto i = 0; i < 64; i++) {
+        auto y = ZigZagInv[i] / 8;
+        auto x = ZigZagInv[i] % 8;
+        bitWriter << Q_c[y][x];
+    }
+
+    // Bits/Pixel, Image Size, Number of Channels, and Subsampling and Y vs C for each channel
+    bitWriter.addMarker(0xC0, 2 + 6 + 3 * 3);
+    bitWriter << 0x08
+        << (imageHeight >> 8) << (imageHeight & 0xFF)
+        << (imageWidth >> 8) << (imageWidth & 0xFF)
+        << 0x03
+        << 0x01 << 0x11 << 0x00
+        << 0x02 << 0x11 << 0x01
+        << 0x03 << 0x11 << 0x01;
+
+    // Huffman Tables
+    bitWriter.addMarker(0xC4, 2 + 208 + 208);
+    bitWriter << 0x00 << DcLuminanceCodesPerBitsize << DcLuminanceValues
+        << 0x10 << AcLuminanceCodesPerBitsize << AcLuminanceValues
+        << 0x01 << DcChrominanceCodesPerBitsize << DcChrominanceValues
+        << 0x11 << AcChrominanceCodesPerBitsize << AcChrominanceValues;
+
+    // Start of Scan
+    bitWriter.addMarker(0xDA, 2 + 1 + 2 * 3 + 3);
+
+    // Number of Channels and Channel map to Huffman Tables
+    bitWriter << 0x03
+        << 0x01 << 0x00
+        << 0x02 << 0x11
+        << 0x03 << 0x11;
+
+    // Spectral Selection - Single Scan
+    bitWriter << 0x00 << 0x3F << 0x00;
+
+    // TODO: Image Data
+    // TODO: entropy coding
+    int16_t lastYDC = 0;
+    int16_t lastCbDC = 0;
+    int16_t lastCrDC = 0;
+
+    for (auto j_block = 0; j_block < imageHeight / 8; j_block++) {
+        for (auto i_block = 0; i_block < imageWidth / 8; i_block++) {
+
+            auto block_num = j_block * imageWidth / 8 + i_block;
+
+            for (auto c = 0; c < imageChannels; c++) {
+
+                auto it = rearrangedData[c] + block_num * 64;
+                std::vector<T_Quant> block64(it, it + 64);
+
+                BitCode* huffman = (c == 0) ? huffmanLuminanceDC : huffmanChrominanceDC;
+
+                int16_t lastDC;
+                if (c == 0) { lastDC = lastYDC;  lastYDC = block64[0]; }
+                else if (c == 1) { lastDC = lastCbDC; lastCbDC = block64[0]; }
+                else { lastDC = lastCrDC; lastCrDC = block64[0]; }
+
+                auto diff = block64[0] - lastDC;
+                if (diff == 0) {
+                    bitWriter << huffman[0x00];
+                }
+                else {
+                    auto bits = codewords[diff];
+                    bitWriter << huffman[bits.numBits] << bits;
+                }
+
+                huffman = (c == 0) ? huffmanLuminanceAC : huffmanChrominanceAC;
+
+                // find last non-zero value in block
+                auto posNonZero = 0;
+                for (auto i = 1; i < 64; i++) {
+                    if (block64[i] != 0) posNonZero = i;
+                }
+
+                auto offset = 0;
+                for (auto i = 1; i <= posNonZero; i++) {
+                    // cound the preceding zeros before a nonzero value
+                    while (block64[i] == 0) {
+                        offset += 0x10;
+                        // write a special symbol for 16 zeros and reset count
+                        if (offset > 0xF0) {
+                            bitWriter << huffman[0xF0];
+                            offset = 0;
+                        }
+                        i++;
+                    }
+
+                    auto encoded = codewords[block64[i]];
+
+                    // combine the run with the size of the symbol
+                    bitWriter << huffman[offset + encoded.numBits] << encoded;
+                    offset = 0;
+                }
+
+                // Write an EOB if the remaining values are zero
+                if (posNonZero < 63) bitWriter << huffman[0x00];
+            }
+        }
+    }
+
+    bitWriter.flush();
+    // End of Image
+
+    bitWriter << 0xFF << 0xD9;
+}
+
 
 int main(int argc, char **argv) {
 
     //To run in parallel, put --parallel at the END of the command line arguments
-    bool parallel = false;
+    bool run_parallel = false;
     if (!strcmp(argv[argc - 1], "--parallel")) {
-        parallel = true;
+        run_parallel = true;
         argc -= 1;
     }
 
@@ -782,18 +793,16 @@ int main(int argc, char **argv) {
     outputFile.open(wbArg_getOutputFile(args), std::ios_base::binary);
 
     if (!outputFile.is_open()) ERROR("Opening output file failed");
+    std::vector<unsigned char> outputData;
+    auto write_one_byte = [&outputData](unsigned char byte) { outputData.push_back(byte); };
 
-    Compressor compressor(args, write_one_byte);
+    //Allocate on heap because Huffman table / codeword member variables are very large
+    std::unique_ptr<Compressor> compressor(new Compressor(args, write_one_byte));
 
-    // Reserve enough in output buffer for very high-quality compression to avoid reallocation
-    outputData.reserve(compressor.getNumPixels() / 4);
+    // Reserve enough in output buffer for very high-quality compression (2 bits/pixel) to avoid reallocation
+    outputData.reserve(compressor->getNumPixels() / 4);
 
-    if (parallel) {
-        compressor.parallel_compress();
-    }
-    else {
-        compressor.sequential_compress();
-    }
+    compressor->compress(run_parallel);
 
     outputFile.write((const char*)outputData.data(), outputData.size());
 
