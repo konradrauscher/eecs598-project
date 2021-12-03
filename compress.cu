@@ -415,9 +415,9 @@ Compressor::~Compressor() {
 }
 
 void Compressor::compress(bool parallel) {
-    auto compress_func = parallel ? this->parallel_compress_slice : this->sequential_compress_slice;
+    auto compress_func = parallel ? &Compressor::parallel_compress_slice : &Compressor::sequential_compress_slice;
 
-    compress_func(hostInputImageData, rearrangedData.data(), imageHeight);
+    (this->*compress_func)(hostInputImageData, rearrangedData.data(), imageHeight);
 }
 
 void Compressor::generateHuffmanTable(const uint8_t numCodes[16], const uint8_t* values, BitCode result[256])
