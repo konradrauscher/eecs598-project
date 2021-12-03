@@ -27,8 +27,9 @@ if [ "$#" -eq  1 ]; then
     TOTAL=0
     for test in test/*; do
         ((++TOTAL))
-        ./$1 -i $test/input.ppm -o $test/attempt.jpg -t image &>/dev/null
-        DIFF=$(diff $test/output.jpg $test/attempt.jpg) &>/dev/null
+        ./$1 -i $test/input.ppm -o $test/attempt_seq.jpg -t image &>/dev/null
+        ./$1 -i $test/input.ppm -o $test/attempt_par.jpg -t image --parallel &>/dev/null
+        DIFF=$(diff $test/attempt_seq.jpg $test/attempt_par.jpg) &>/dev/null
         if [ "$DIFF" != "" ] 
         then
             echo "$test is incorrect..."
@@ -42,8 +43,9 @@ if [ "$#" -eq  1 ]; then
 fi
 
 if [ "$#" -eq  2 ]; then
-    ./$1 -i test/$2/input.ppm -o test/$2/attempt.jpg -t image
-    DIFF=$(diff test/$2/output.jpg test/$2/attempt.jpg) &>/dev/null
+    ./$1 -i test/$2/input.ppm -o test/$2/attempt_seq.jpg -t image
+    ./$1 -i test/$2/input.ppm -o test/$2/attempt_par.jpg -t image --parallel
+    DIFF=$(diff test/$2/attempt_seq.jpg test/$2/attempt_par.jpg) &>/dev/null
     if [ "$DIFF" != "" ] 
     then
         echo "test $2 is incorrect..."
