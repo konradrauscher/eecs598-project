@@ -570,58 +570,55 @@ void Compressor::parallel_compress_slice(const float* inputData, T_Quant* output
     DevicePtr<T_Quant> deviceQuantData(numEl);
     DevicePtr<T_Quant> deviceZigzagData(numEl);
 
-    wbCheck(cudaMemcpy(deviceRGBImageData.get(), hostInputImageData, numEl*sizeof(float), cudaMemcpyHostToDevice));
-    
-    dim3 DimGrid1((numPix-1)/1024 + 1, 1, 1);
-    dim3 DimBlock1(1024, 1, 1);
-
+    wbCheck(cudaMemcpy(deviceRGBImageData.get(), hostInputImageData, numEl*sizeof(float), cudaMemcpyHostToDevice)); 
     float* deviceY = deviceYCbCrImageData.get();
     float* deviceCb = deviceY + numPix;
     float* deviceCr = deviceCb + numPix;
-
-    kernel_rgb_to_ycbcr<<<DimGrid1, DimBlock1>>>(deviceRGBImageData.get(), deviceY, deviceCb, deviceCr, numPix);
-
-    wbCheck(cudaDeviceSynchronize());
     
     float* deviceYDCT = deviceDCTData.get();
     float* deviceCbDCT = deviceYDCT + numPix;
     float* deviceCrDCT = deviceCbDCT + numPix;
 
-    dim3 DimGrid2((imageWidth-1)/8+1, (imageHeight-1)/8 + 1, 1);
-    dim3 DimBlock2(8,8,1);
-
-    kernel_block_dct<<<DimGrid2, DimBlock2>>>(deviceY,  deviceYDCT,  dct_device.get(), imageWidth, imageHeight);
-    kernel_block_dct<<<DimGrid2, DimBlock2>>>(deviceCb, deviceCbDCT, dct_device.get(), imageWidth, imageHeight);
-    kernel_block_dct<<<DimGrid2, DimBlock2>>>(deviceCr, deviceCrDCT, dct_device.get(), imageWidth, imageHeight);
-
-    wbCheck(cudaDeviceSynchronize());
-
     T_Quant* deviceYQuant = deviceQuantData.get();
     T_Quant* deviceCbQuant = deviceYQuant + numPix;
     T_Quant* deviceCrQuant = deviceCbQuant + numPix;
-
-    kernel_quantize_dct_output<<<DimGrid2, DimBlock2>>>(deviceYDCT,  deviceYQuant,  Q_l_device.get(), imageWidth, imageHeight);
-    kernel_quantize_dct_output<<<DimGrid2, DimBlock2>>>(deviceCbDCT, deviceCbQuant, Q_c_device.get(), imageWidth, imageHeight);
-    kernel_quantize_dct_output<<<DimGrid2, DimBlock2>>>(deviceCrDCT, deviceCrQuant, Q_c_device.get(), imageWidth, imageHeight);
-
-    wbCheck(cudaDeviceSynchronize());
 
     T_Quant* deviceYZigzag = deviceZigzagData.get();
     T_Quant* deviceCbZigzag = deviceYZigzag + numPix;
     T_Quant* deviceCrZigzag = deviceCbZigzag + numPix;
 
+    dim3 DimGrid1((numPix-1)/1024 + 1, 1, 1);
+    dim3 DimBlock1(1024, 1, 1);
+
+    dim3 DimGrid2((imageWidth-1)/8+1, (imageHeight-1)/8 + 1, 1);
+    dim3 DimBlock2(8,8,1);
+
+    wbCheck(cudaMemcpy(deviceRGBImageData.get(), hostInputImageData, numEl*sizeof(float), cudaMemcpyHostToDevice));
+    
+    kernel_rgb_to_ycbcr<<<DimGrid1, DimBlock1>>>(deviceRGBImageData.get(), deviceY, deviceCb, deviceCr, numPix);
+    wbCheck(cudaDeviceSynchronize());
+
+    kernel_block_dct<<<DimGrid2, DimBlock2>>>(deviceY,  deviceYDCT,  dct_device.get(), imageWidth, imageHeight);
+    kernel_block_dct<<<DimGrid2, DimBlock2>>>(deviceCb, deviceCbDCT, dct_device.get(), imageWidth, imageHeight);
+    kernel_block_dct<<<DimGrid2, DimBlock2>>>(deviceCr, deviceCrDCT, dct_device.get(), imageWidth, imageHeight);
+    wbCheck(cudaDeviceSynchronize());
+
+    kernel_quantize_dct_output<<<DimGrid2, DimBlock2>>>(deviceYDCT,  deviceYQuant,  Q_l_device.get(), imageWidth, imageHeight);
+    kernel_quantize_dct_output<<<DimGrid2, DimBlock2>>>(deviceCbDCT, deviceCbQuant, Q_c_device.get(), imageWidth, imageHeight);
+    kernel_quantize_dct_output<<<DimGrid2, DimBlock2>>>(deviceCrDCT, deviceCrQuant, Q_c_device.get(), imageWidth, imageHeight);
+    wbCheck(cudaDeviceSynchronize());
+
+
+
     kernel_zigzag << <DimGrid2, DimBlock2 >> > (deviceYQuant,  deviceYZigzag,  zigzag_map_device.get(), imageWidth, imageHeight);
     kernel_zigzag << <DimGrid2, DimBlock2 >> > (deviceCbQuant, deviceCbZigzag, zigzag_map_device.get(), imageWidth, imageHeight);
     kernel_zigzag << <DimGrid2, DimBlock2 >> > (deviceCrQuant, deviceCrZigzag, zigzag_map_device.get(), imageWidth, imageHeight);
-
     wbCheck(cudaDeviceSynchronize());
-
 
     size_t memcpySize = imageWidth * imageHeight * sizeof(*deviceYZigzag);
     wbCheck(cudaMemcpy(outputData[0], deviceYZigzag,  memcpySize, cudaMemcpyDeviceToHost));
     wbCheck(cudaMemcpy(outputData[1], deviceCbZigzag, memcpySize, cudaMemcpyDeviceToHost));
     wbCheck(cudaMemcpy(outputData[2], deviceCrZigzag, memcpySize, cudaMemcpyDeviceToHost));
-
 
     write_file();
 }
@@ -637,7 +634,7 @@ void Compressor::write_file() {
                     (int)rearrangedData[2][idx]);
             }
             printf("\n\n");
-        }
+       }
     }
 
     const uint8_t HeaderJfif[2 + 2 + 16] = {
