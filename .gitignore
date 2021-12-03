@@ -3,6 +3,7 @@
 # Edit at https://www.toptal.com/developers/gitignore?templates=visualstudio,visualstudiocode,cuda
 
 *.out
+*/attempt*.jpg
 
 ### CUDA ###
 *.i

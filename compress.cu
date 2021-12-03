@@ -146,6 +146,53 @@ __global__ void kernel_subtract_dc_values(const int16_t* inputData, int16_t* dif
     }
 }
 
+__global__ void kernel_combined(const float* inputData, int* outputData, const float* dct, const uint8_t* Q, const uint8_t* zigzag_map, uint width, uint height) {
+   
+    assert(blockDim.x == 8);
+    assert(blockDim.y == 8);
+
+    __shared__ int dctq_data[64];
+
+    uint j_block = blockIdx.y, i_block = blockIdx.x;
+    uint j_tile = threadIdx.y, i_tile = threadIdx.x;
+    
+    size_t i = i_block * 8 + i_tile; // overall i index in image
+    size_t j = j_block * 8 + j_tile; // overall j index in image
+    
+    if (i >= width || j >= height) return;
+    
+    size_t block_num = j_block * width / 8 + i_block;
+    size_t tile_num = j_tile * 8 + i_tile;
+
+    // DCT
+    
+    float c_i = (i_tile == 0) ? sqrt1_2 : 1.0f;
+    float c_j = (j_tile == 0) ? sqrt1_2 : 1.0f;
+
+    float sum = 0;
+
+    // loop within an 8x8 tile to generate sum
+    for (size_t j_sum = 0; j_sum < 8; j_sum++) {
+        for (size_t i_sum = 0; i_sum < 8; i_sum++) {
+        
+            float cos1 = dct[i_sum*8 + i_tile];
+            float cos2 = dct[j_sum*8 + j_tile];
+
+            size_t x = i_block * 8 + i_sum;
+            size_t y = j_block * 8 + j_sum;
+
+            sum += (inputData[y * width + x] * cos1 * cos2);
+        }
+    }
+
+    float dct_temp = 0.25 * c_i * c_j * sum;
+    dctq_data[j_tile * 8 + i_tile] = (int) round(dct_temp / Q[j_tile*8 + i_tile]);
+
+    __syncthreads();
+
+    outputData[block_num * 64 + zigzag_map[tile_num]] = dctq_data[j_tile * 8 + i_tile];
+}
+
 template<typename T>
 class DevicePtr{
 private:
@@ -271,6 +318,7 @@ struct BitWriter
 
 class Compressor {
 private:
+    bool combined;
     const char* inputImageFile;
     wbImage_t inputImage;
     BitWriter bitWriter;
@@ -381,7 +429,7 @@ private:
     void generateHuffmanTable(const uint8_t numCodes[16], const uint8_t* values, BitCode result[256]);
 
 public:
-    Compressor(wbArg_t args, WRITE_ONE_BYTE _output);
+    Compressor(wbArg_t args, bool _combined, WRITE_ONE_BYTE _output);
     ~Compressor();
     void sequential_compress();
     void parallel_compress();
@@ -390,8 +438,9 @@ public:
     }
 };
 
-Compressor::Compressor(wbArg_t args, WRITE_ONE_BYTE _output)
-    : bitWriter(_output)
+Compressor::Compressor(wbArg_t args, bool _combined, WRITE_ONE_BYTE _output)
+    : combined(_combined)
+    , bitWriter(_output)
     , dct_device(64)
     , Q_l_device(64)
     , Q_c_device(64)
@@ -748,14 +797,6 @@ void Compressor::parallel_compress() {
     float* deviceY = deviceYCbCrImageData.get();
     float* deviceCb = deviceY + numPix;
     float* deviceCr = deviceCb + numPix;
-    
-    float* deviceYDCT = deviceDCTData.get();
-    float* deviceCbDCT = deviceYDCT + numPix;
-    float* deviceCrDCT = deviceCbDCT + numPix;
-
-    int* deviceYQuant = deviceQuantData.get();
-    int* deviceCbQuant = deviceYQuant + numPix;
-    int* deviceCrQuant = deviceCbQuant + numPix;
 
     int* deviceYZigzag = deviceZigzagData.get();
     int* deviceCbZigzag = deviceYZigzag + numPix;
@@ -772,20 +813,38 @@ void Compressor::parallel_compress() {
     kernel_rgb_to_ycbcr<<<DimGrid1, DimBlock1>>>(deviceRGBImageData.get(), deviceY, deviceCb, deviceCr, numPix);
     wbCheck(cudaDeviceSynchronize());
 
-    kernel_block_dct<<<DimGrid2, DimBlock2>>>(deviceY,  deviceYDCT,  dct_device.get(), imageWidth, imageHeight);
-    kernel_block_dct<<<DimGrid2, DimBlock2>>>(deviceCb, deviceCbDCT, dct_device.get(), imageWidth, imageHeight);
-    kernel_block_dct<<<DimGrid2, DimBlock2>>>(deviceCr, deviceCrDCT, dct_device.get(), imageWidth, imageHeight);
-    wbCheck(cudaDeviceSynchronize());
+    if (combined) {
+        kernel_combined<<<DimGrid2, DimBlock2>>>(deviceY,  deviceYZigzag,  dct_device.get(), Q_l_device.get(), zigzag_map_device.get(), imageWidth, imageHeight);
+        kernel_combined<<<DimGrid2, DimBlock2>>>(deviceCb, deviceCbZigzag, dct_device.get(), Q_c_device.get(), zigzag_map_device.get(), imageWidth, imageHeight);
+        kernel_combined<<<DimGrid2, DimBlock2>>>(deviceCr, deviceCrZigzag, dct_device.get(), Q_c_device.get(), zigzag_map_device.get(), imageWidth, imageHeight);
+        wbCheck(cudaDeviceSynchronize());
+    }
+    else {
 
-    kernel_quantize_dct_output<<<DimGrid2, DimBlock2>>>(deviceYDCT,  deviceYQuant,  Q_l_device.get(), imageWidth, imageHeight);
-    kernel_quantize_dct_output<<<DimGrid2, DimBlock2>>>(deviceCbDCT, deviceCbQuant, Q_c_device.get(), imageWidth, imageHeight);
-    kernel_quantize_dct_output<<<DimGrid2, DimBlock2>>>(deviceCrDCT, deviceCrQuant, Q_c_device.get(), imageWidth, imageHeight);
-    wbCheck(cudaDeviceSynchronize());
+        float* deviceYDCT = deviceDCTData.get();
+        float* deviceCbDCT = deviceYDCT + numPix;
+        float* deviceCrDCT = deviceCbDCT + numPix;
 
-    kernel_zigzag << <DimGrid2, DimBlock2 >> > (deviceYQuant,  deviceYZigzag,  zigzag_map_device.get(), imageWidth, imageHeight);
-    kernel_zigzag << <DimGrid2, DimBlock2 >> > (deviceCbQuant, deviceCbZigzag, zigzag_map_device.get(), imageWidth, imageHeight);
-    kernel_zigzag << <DimGrid2, DimBlock2 >> > (deviceCrQuant, deviceCrZigzag, zigzag_map_device.get(), imageWidth, imageHeight);
-    wbCheck(cudaDeviceSynchronize());
+        int* deviceYQuant = deviceQuantData.get();
+        int* deviceCbQuant = deviceYQuant + numPix;
+        int* deviceCrQuant = deviceCbQuant + numPix;
+
+        kernel_block_dct<<<DimGrid2, DimBlock2>>>(deviceY,  deviceYDCT,  dct_device.get(), imageWidth, imageHeight);
+        kernel_block_dct<<<DimGrid2, DimBlock2>>>(deviceCb, deviceCbDCT, dct_device.get(), imageWidth, imageHeight);
+        kernel_block_dct<<<DimGrid2, DimBlock2>>>(deviceCr, deviceCrDCT, dct_device.get(), imageWidth, imageHeight);
+        wbCheck(cudaDeviceSynchronize());
+    
+        kernel_quantize_dct_output<<<DimGrid2, DimBlock2>>>(deviceYDCT,  deviceYQuant,  Q_l_device.get(), imageWidth, imageHeight);
+        kernel_quantize_dct_output<<<DimGrid2, DimBlock2>>>(deviceCbDCT, deviceCbQuant, Q_c_device.get(), imageWidth, imageHeight);
+        kernel_quantize_dct_output<<<DimGrid2, DimBlock2>>>(deviceCrDCT, deviceCrQuant, Q_c_device.get(), imageWidth, imageHeight);
+        wbCheck(cudaDeviceSynchronize());
+    
+        kernel_zigzag << <DimGrid2, DimBlock2 >> > (deviceYQuant,  deviceYZigzag,  zigzag_map_device.get(), imageWidth, imageHeight);
+        kernel_zigzag << <DimGrid2, DimBlock2 >> > (deviceCbQuant, deviceCbZigzag, zigzag_map_device.get(), imageWidth, imageHeight);
+        kernel_zigzag << <DimGrid2, DimBlock2 >> > (deviceCrQuant, deviceCrZigzag, zigzag_map_device.get(), imageWidth, imageHeight);
+        wbCheck(cudaDeviceSynchronize());
+    }
+
 
     //Note that this and the next kernel can be done independently of each other
     /*dim3 DimGrid3((imageHeight - 1) / (8*16) + 1, (imageWidth - 1) / (8*16) + 1, 1);
@@ -855,20 +914,31 @@ void write_one_byte(unsigned char byte) { outputData.push_back(byte); };
 int main(int argc, char **argv) {
 
     //To run in parallel, put --parallel at the END of the command line arguments
+    int num_args = argc;
     bool parallel = false;
-    if (!strcmp(argv[argc - 1], "--parallel")) {
-        parallel = true;
-        argc -= 1;
+    bool combined = false;
+    for (int i = 0; i < argc; i++) {
+        if (!strcmp(argv[i], "--parallel")) {
+            parallel = true;
+            num_args -= 1;
+            printf("\tRunning Parallel version\n");
+        }
+        if (!strcmp(argv[i], "--combined")) {
+            combined = true;
+            num_args -= 1;
+            printf("\tRunning combined kernel version\n");
+
+        }
     }
 
-    wbArg_t args = wbArg_read(argc, argv);
+    wbArg_t args = wbArg_read(num_args, argv);
 
     std::ofstream outputFile;
     outputFile.open(wbArg_getOutputFile(args), std::ios_base::binary);
 
     if (!outputFile.is_open()) ERROR("Opening output file failed");
 
-    Compressor compressor(args, write_one_byte);
+    Compressor compressor(args, combined, write_one_byte);
 
     // Reserve enough in output buffer for very high-quality compression to avoid reallocation
     outputData.reserve(compressor.getNumPixels() / 4);
