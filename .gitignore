@@ -4,6 +4,7 @@
 
 *.out
 */attempt*.jpg
+*/*/attempt*.jpg
 
 ### CUDA ###
 *.i
