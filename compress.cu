@@ -417,8 +417,8 @@ static const uint8_t AcChrominanceValues        [162] =                         
     0xE2,0xE3,0xE4,0xE5,0xE6,0xE7,0xE8,0xE9,0xEA,0xF2,0xF3,0xF4,0xF5,0xF6,0xF7,0xF8,0xF9,0xFA 
 };
 
-class CudaHostFreer {
-    void operator(void* ptr) {
+struct CudaHostFreer {
+    void operator()(void* ptr) {
         cudaFreeHost(ptr);
     }
 };
@@ -534,6 +534,9 @@ void Compressor::init_codewords() {
 }
 
 Compressor::~Compressor() {
+#ifdef PAGE_LOCK_HOST_BUFFERS
+    cudaHostUnregister(hostInputImageData);
+#endif
     wbImage_delete(inputImage);
 }
 
@@ -541,6 +544,7 @@ void Compressor::compress(bool parallel) {
 
     if (!parallel) {
         sequential_compress_slice(hostInputImageData, rearrangedData.data(), imageHeight);
+        write_file();
         return;
     }
 
@@ -565,6 +569,7 @@ void Compressor::compress(bool parallel) {
     for (auto& stream : streams) {
         stream->synchronize();
     }
+    write_file();
 }
 
 void Compressor::generateHuffmanTable(const uint8_t numCodes[16], const uint8_t* values, BitCode result[256])
@@ -662,8 +667,6 @@ void Compressor::sequential_compress_slice(const float* inputData, T_Quant* outp
         }
     }
 
-    // Encode and write file
-    write_file();
 }
 
 void Compressor::sequential_dct(const float* inputData, float* outputData, int width, int height) {
@@ -730,7 +733,7 @@ void Compressor::parallel_compress_slice(void* gpuScratch, size_t startLine, siz
     dim3 DimGrid3((imageWidth - 1) / 8 + 1, (numLines - 1) / 8 + 1, 1);
     dim3 DimBlock3(8, 8, 3);
 
-    wbCheck(cudaMemcpyAsync(deviceRGBImageData, hostInputImageData + startLine*imageWidth, numEl*sizeof(float), cudaMemcpyHostToDevice, stream));
+    wbCheck(cudaMemcpyAsync(deviceRGBImageData, hostInputImageData + startLine*imageWidth*imageChannels, numEl*sizeof(float), cudaMemcpyHostToDevice, stream));
 
     if (combined) {
         Array<const uint8_t*, 3> Q_tables{ {Q_l_device.get(), Q_c_device.get(), Q_c_device.get()} };
@@ -773,9 +776,6 @@ void Compressor::parallel_compress_slice(void* gpuScratch, size_t startLine, siz
     wbCheck(cudaMemcpyAsync(rearrangedData[1] + startLine * imageWidth, deviceCbZigzag, memcpySize, cudaMemcpyDeviceToHost, stream));
     wbCheck(cudaMemcpyAsync(rearrangedData[2] + startLine * imageWidth, deviceCrZigzag, memcpySize, cudaMemcpyDeviceToHost, stream));
 
-    wbCheck(cudaStreamSynchronize(stream));
-
-    write_file();
 }
 
 
