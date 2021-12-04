@@ -113,12 +113,12 @@ __global__ void kernel_zigzag(const int* inputData, T_Quant* outputData, const u
 template<typename T, int N>
 struct Array {
     T data[N];
-    __host__ __device__ T& operator[](size_t i) const {
+    __host__ __device__ T& operator[](size_t i) {
         return data[i];
     }
 };
 
-__global__ void kernel_combined(const float* inputData, T_Quant* outputData, const float* dct, Array<uint8_t*,3> Q, const uint8_t* zigzag_map, uint width, uint height) {
+__global__ void kernel_combined(const float* inputData, T_Quant* outputData, const float* dct, Array<const uint8_t*,3> Q, const uint8_t* zigzag_map, uint width, uint height) {
    
     assert(blockDim.x == 8);
     assert(blockDim.y == 8);
@@ -176,9 +176,6 @@ __global__ void kernel_combined(const float* inputData, T_Quant* outputData, con
         
             float cos1 = dct[i_sum*8 + i_tile];
             float cos2 = dct[j_sum*8 + j_tile];
-
-            size_t x = i_block * 8 + i_sum;
-            size_t y = j_block * 8 + j_sum;
 
             sum += (blockInputData[chan_idx][j_sum][i_sum] * cos1 * cos2);
         }
@@ -671,15 +668,15 @@ void Compressor::parallel_compress_slice(const float* inputData, T_Quant* output
     dim3 DimBlock2(8,8,1);
 
 
-    dim3 DimGrid2((imageWidth - 1) / 8 + 1, (numLines - 1) / 8 + 1, 1);
-    dim3 DimBlock2(8, 8, 3);
+    dim3 DimGrid3((imageWidth - 1) / 8 + 1, (numLines - 1) / 8 + 1, 1);
+    dim3 DimBlock3(8, 8, 3);
 
     wbCheck(cudaMemcpyAsync(deviceRGBImageData, hostInputImageData, numEl*sizeof(float), cudaMemcpyHostToDevice, stream));
     
 
     if (combined) {
-        Array<uint8_t*, 3> Q_tables{ {Q_l_device.get(), Q_c_device.get(), Q_c_device.get()} };
-        kernel_combined<<<DimGrid2, DimBlock2, 0, stream>>>(deviceY,  deviceYZigzag,  dct_device.get(), Q_tables, zigzag_map_device.get(), imageWidth, numLines);
+        Array<const uint8_t*, 3> Q_tables{ {Q_l_device.get(), Q_c_device.get(), Q_c_device.get()} };
+        kernel_combined<<<DimGrid3, DimBlock3, 0, stream>>>(deviceRGBImageData, deviceZigzagData,  dct_device.get(), Q_tables, zigzag_map_device.get(), imageWidth, numLines);
     }
     else {
         DevicePtr<float> deviceYCbCrImageData(numEl);
@@ -690,7 +687,7 @@ void Compressor::parallel_compress_slice(const float* inputData, T_Quant* output
         float* deviceCb = deviceY + numPix;
         float* deviceCr = deviceCb + numPix;
 
-        kernel_rgb_to_ycbcr<<<DimGrid1, DimBlock1, 0, stream >>>(deviceRGBImageData.get(), deviceY, deviceCb, deviceCr, numPix);
+        kernel_rgb_to_ycbcr<<<DimGrid1, DimBlock1, 0, stream >>>(deviceRGBImageData, deviceY, deviceCb, deviceCr, numPix);
 
         float* deviceYDCT = deviceDCTData.get();
         float* deviceCbDCT = deviceYDCT + numPix;
