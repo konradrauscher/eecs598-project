@@ -461,13 +461,9 @@ private:
     char* gpuScratch;
     DevicePtr<char> gpuMem;
 
-    std::vector<T_Quant*> rearrangedData;
-    #ifdef PAGE_LOCK_HOST_BUFFERS
-    std::unique_ptr<T_Quant, CudaHostFreer> rearrangedBuf;
-    #else
+    std::vector<T_Quant*> rearrangedData;    
     std::unique_ptr<T_Quant[]> rearrangedBuf;
-    #endif
-
+    
     void init_codewords();
     void sequential_dct(const float* inputData, float* outputData, int width, int height);
     void write_file();
@@ -499,13 +495,14 @@ Compressor::Compressor(wbArg_t args, bool _combined, WRITE_ONE_BYTE _output)
 
     if (imageChannels != 3) ERROR("Image must have three channels");
 
-    #ifdef PAGE_LOCK_HOST_BUFFERS
-    T_Quant* tmpPtr;
-    wbCheck(cudaMallocHost(&tmpPtr, imageWidth * imageHeight * imageChannels * sizeof(T_Quant)));
-    rearrangedBuf.reset(tmpPtr);
-    wbCheck(cudaHostRegister(hostInputImageData, imageWidth * imageHeight * imageChannels * sizeof(*hostInputImageData), cudaHostRegisterDefault));
-    #else
+    //Use cudaMemGetInfo to initialize CUDA memory system so it doesn't mess up other timing
+    size_t dummy;
+    wbCheck(cudaMemGetInfo(&dummy, &dummy));
+    
     rearrangedBuf.reset(new T_Quant[imageWidth*imageHeight*imageChannels]);
+    #ifdef PAGE_LOCK_HOST_BUFFERS
+    wbCheck(cudaHostRegister(hostInputImageData, imageWidth * imageHeight * imageChannels * sizeof(*hostInputImageData), cudaHostRegisterDefault));
+    wbCheck(cudaHostRegister(rearrangedBuf.get(), imageWidth * imageHeight * imageChannels * sizeof(rearrangedBuf[0]), cudaHostRegisterDefault));
     #endif
     for (uint32_t ii = 0; ii < imageChannels; ++ii) {
         rearrangedData.push_back(rearrangedBuf.get() + ii * imageWidth * imageHeight);
