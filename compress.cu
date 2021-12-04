@@ -2,9 +2,12 @@
 #include <memory>
 #include <fstream>
 #include <functional>
+#include <queue>
 
 #define pi 3.14159265f
 #define sqrt1_2 0.707106781f
+
+#define PAGE_LOCK_HOST_BUFFERS
 
 using T_Quant = int;
 //using T_Quant = int16_t;
@@ -229,6 +232,25 @@ public:
     }
 };
 
+class Stream {
+    cudaStream_t mStream;
+public:
+    Stream() {
+        wbCheck(cudaStreamCreate(&mStream));
+    }
+    ~Stream() {
+        cudaStreamDestroy(mStream);
+    }
+
+    void synchronize() {
+        wbCheck(cudaStreamSynchronize(mStream));
+    }
+
+    operator cudaStream_t() const {
+        return mStream;
+    }
+};
+
 // represent a single Huffman code i.e. a sequence of bits with length up to 16
 struct BitCode
 {
@@ -394,6 +416,13 @@ static const uint8_t AcChrominanceValues        [162] =                         
     0xB5,0xB6,0xB7,0xB8,0xB9,0xBA,0xC2,0xC3,0xC4,0xC5,0xC6,0xC7,0xC8,0xC9,0xCA,0xD2,0xD3,0xD4,0xD5,0xD6,0xD7,0xD8,0xD9,0xDA,
     0xE2,0xE3,0xE4,0xE5,0xE6,0xE7,0xE8,0xE9,0xEA,0xF2,0xF3,0xF4,0xF5,0xF6,0xF7,0xF8,0xF9,0xFA 
 };
+
+class CudaHostFreer {
+    void operator(void* ptr) {
+        cudaFreeHost(ptr);
+    }
+};
+
 class Compressor {
 private:
     bool combined;
@@ -419,7 +448,11 @@ private:
     DevicePtr<uint8_t> zigzag_map_device;
 
     std::vector<T_Quant*> rearrangedData;
+    #ifdef PAGE_LOCK_HOST_BUFFERS
+    std::unique_ptr<T_Quant, CudaHostFreer> rearrangedBuf;
+    #else
     std::unique_ptr<T_Quant[]> rearrangedBuf;
+    #endif
 
     void init_codewords();
     void sequential_dct(const float* inputData, float* outputData, int width, int height);
@@ -430,7 +463,7 @@ public:
     Compressor(wbArg_t args, bool _combined, WRITE_ONE_BYTE _output);
     ~Compressor();
     void sequential_compress_slice(const float* inputData, T_Quant* outputData[3], size_t numLines);
-    void parallel_compress_slice(const float* inputData, T_Quant* outputData[3], void* gpuScratch, size_t numLines, cudaStream_t stream);
+    void parallel_compress_slice(void* gpuScratch, size_t startLine, size_t numLines, cudaStream_t stream);
     void compress(bool parallel);
     size_t getNumPixels() const {
         return (size_t)imageWidth * (size_t)imageHeight;
@@ -456,7 +489,14 @@ Compressor::Compressor(wbArg_t args, bool _combined, WRITE_ONE_BYTE _output)
 
     if (imageChannels != 3) ERROR("Image must have three channels");
 
+    #ifdef PAGE_LOCK_HOST_BUFFERS
+    T_Quant* tmpPtr;
+    wbCheck(cudaMallocHost(&tmpPtr, imageWidth * imageHeight * imageChannels * sizeof(T_Quant)));
+    rearrangedBuf.reset(tmpPtr);
+    wbCheck(cudaHostRegister(hostInputImageData, imageWidth * imageHeight * imageChannels * sizeof(*hostInputImageData), cudaHostRegisterDefault));
+    #else
     rearrangedBuf.reset(new T_Quant[imageWidth*imageHeight*imageChannels]);
+    #endif
     for (uint32_t ii = 0; ii < imageChannels; ++ii) {
         rearrangedData.push_back(rearrangedBuf.get() + ii * imageWidth * imageHeight);
     }
@@ -499,12 +539,31 @@ Compressor::~Compressor() {
 
 void Compressor::compress(bool parallel) {
 
-    if (parallel) {
-        DevicePtr<char> gpuScratch(imageWidth * imageHeight * imageChannels * (sizeof(float) + sizeof(T_Quant)));
-        parallel_compress_slice(hostInputImageData, rearrangedData.data(), gpuScratch.get(), imageHeight, cudaStreamDefault);
-    }
-    else {
+    if (!parallel) {
         sequential_compress_slice(hostInputImageData, rearrangedData.data(), imageHeight);
+        return;
+    }
+
+    constexpr unsigned int NUM_STREAMS = 6;
+    constexpr unsigned int LINES_PER_SLICE = 256;
+
+    size_t bytesPerLine = imageWidth * imageChannels * (sizeof(float) + sizeof(T_Quant));
+
+    DevicePtr<char> gpuScratch((NUM_STREAMS * LINES_PER_SLICE) * bytesPerLine);
+    std::vector<void*> scratchBufs;
+    std::vector<std::unique_ptr<Stream>> streams;
+    for (size_t ii = 0; ii < NUM_STREAMS; ++ii) {
+        scratchBufs.push_back(gpuScratch.get() + bytesPerLine*ii*LINES_PER_SLICE);
+        streams.emplace_back(new Stream());
+    }
+
+    for (size_t startLine = 0, sliceIdx = 0; startLine < imageHeight; startLine += LINES_PER_SLICE, ++sliceIdx) {
+        if (sliceIdx == NUM_STREAMS) sliceIdx = 0;
+        parallel_compress_slice(scratchBufs[sliceIdx], startLine, LINES_PER_SLICE, *streams[sliceIdx]);
+    }
+
+    for (auto& stream : streams) {
+        stream->synchronize();
     }
 }
 
@@ -647,7 +706,8 @@ void Compressor::sequential_dct(const float* inputData, float* outputData, int w
     }
 }
 
-void Compressor::parallel_compress_slice(const float* inputData, T_Quant* outputData[3], void* gpuScratch, size_t numLines, cudaStream_t stream) {
+void Compressor::parallel_compress_slice(void* gpuScratch, size_t startLine, size_t numLines, cudaStream_t stream) {
+    numLines = std::min(numLines, imageHeight - startLine);
 
     size_t numPix = imageWidth * numLines;
     size_t numEl = numPix * imageChannels;
@@ -667,12 +727,10 @@ void Compressor::parallel_compress_slice(const float* inputData, T_Quant* output
     dim3 DimGrid2((imageWidth-1)/8+1, (numLines-1)/8 + 1, 1);
     dim3 DimBlock2(8,8,1);
 
-
     dim3 DimGrid3((imageWidth - 1) / 8 + 1, (numLines - 1) / 8 + 1, 1);
     dim3 DimBlock3(8, 8, 3);
 
-    wbCheck(cudaMemcpyAsync(deviceRGBImageData, hostInputImageData, numEl*sizeof(float), cudaMemcpyHostToDevice, stream));
-    
+    wbCheck(cudaMemcpyAsync(deviceRGBImageData, hostInputImageData + startLine*imageWidth, numEl*sizeof(float), cudaMemcpyHostToDevice, stream));
 
     if (combined) {
         Array<const uint8_t*, 3> Q_tables{ {Q_l_device.get(), Q_c_device.get(), Q_c_device.get()} };
@@ -711,9 +769,9 @@ void Compressor::parallel_compress_slice(const float* inputData, T_Quant* output
     }
 
     size_t memcpySize = imageWidth * numLines * sizeof(*deviceYZigzag);
-    wbCheck(cudaMemcpyAsync(outputData[0], deviceYZigzag,  memcpySize, cudaMemcpyDeviceToHost, stream));
-    wbCheck(cudaMemcpyAsync(outputData[1], deviceCbZigzag, memcpySize, cudaMemcpyDeviceToHost, stream));
-    wbCheck(cudaMemcpyAsync(outputData[2], deviceCrZigzag, memcpySize, cudaMemcpyDeviceToHost, stream));
+    wbCheck(cudaMemcpyAsync(rearrangedData[0] + startLine * imageWidth, deviceYZigzag,  memcpySize, cudaMemcpyDeviceToHost, stream));
+    wbCheck(cudaMemcpyAsync(rearrangedData[1] + startLine * imageWidth, deviceCbZigzag, memcpySize, cudaMemcpyDeviceToHost, stream));
+    wbCheck(cudaMemcpyAsync(rearrangedData[2] + startLine * imageWidth, deviceCrZigzag, memcpySize, cudaMemcpyDeviceToHost, stream));
 
     wbCheck(cudaStreamSynchronize(stream));
 
