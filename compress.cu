@@ -3,15 +3,26 @@
 #include <fstream>
 #include <functional>
 #include <queue>
+#include <limits>
 
 #define pi 3.14159265f
 #define sqrt1_2 0.707106781f
 
 #define PAGE_LOCK_HOST_BUFFERS
+#define USE_STREAMS
+#define SINGLE_GPU_BUFFER
 
 using T_Quant = int;
 //using T_Quant = int16_t;
 
+
+#ifdef USE_STREAMS
+constexpr unsigned int NUM_STREAMS = 6;
+constexpr unsigned int LINES_PER_SLICE = 256;
+#else
+constexpr unsigned int NUM_STREAMS = 1;
+constexpr unsigned int LINES_PER_SLICE = std::numeric_limits<unsigned int>::max();
+#endif
 
 using WRITE_ONE_BYTE = std::function<void(unsigned char)>;
 
@@ -433,6 +444,7 @@ private:
     uint32_t imageHeight;
     uint32_t imageChannels;
     float* hostInputImageData;
+    size_t bytesPerLine;
     
     // Huffman tables for lookup during encoding
     BitCode  codewordsArray[4096];     // note: quantized[i] is found at codewordsArray[quantized[i] + CodeWordLimit]
@@ -442,10 +454,12 @@ private:
     BitCode huffmanChrominanceDC[256];
     BitCode huffmanChrominanceAC[256];
 
-    DevicePtr<float> dct_device;
-    DevicePtr<uint8_t> Q_l_device;
-    DevicePtr<uint8_t> Q_c_device;
-    DevicePtr<uint8_t> zigzag_map_device;
+    float* dct_device;
+    uint8_t* Q_l_device;
+    uint8_t* Q_c_device;
+    uint8_t* zigzag_map_device;
+    char* gpuScratch;
+    DevicePtr<char> gpuMem;
 
     std::vector<T_Quant*> rearrangedData;
     #ifdef PAGE_LOCK_HOST_BUFFERS
@@ -473,10 +487,6 @@ public:
 Compressor::Compressor(wbArg_t args, bool _combined, WRITE_ONE_BYTE _output)
     : combined(_combined)
     , bitWriter(_output)
-    , dct_device(64)
-    , Q_l_device(64)
-    , Q_c_device(64)
-    , zigzag_map_device(64)
 {
     wbTime_start(Generic, "Importing data and creating memory on host");
     inputImageFile = wbArg_getInputFile(args, 0);
@@ -508,10 +518,27 @@ Compressor::Compressor(wbArg_t args, bool _combined, WRITE_ONE_BYTE _output)
 
     init_codewords();
 
-    wbCheck(cudaMemcpy(dct_device.get(), dct, sizeof(dct), cudaMemcpyHostToDevice));
-    wbCheck(cudaMemcpy(Q_l_device.get(), Q_l, sizeof(Q_l), cudaMemcpyHostToDevice));
-    wbCheck(cudaMemcpy(Q_c_device.get(), Q_c, sizeof(Q_c), cudaMemcpyHostToDevice));
-    wbCheck(cudaMemcpy(zigzag_map_device.get(), zigzag_map, sizeof(zigzag_map), cudaMemcpyHostToDevice));
+    bytesPerLine = imageWidth * imageChannels * (sizeof(float) + sizeof(T_Quant));
+    size_t scratchSize = (NUM_STREAMS * LINES_PER_SLICE) * bytesPerLine;
+    #ifdef SINGLE_GPU_BUFFER
+    gpuMem.reset(scratchSize + sizeof(dct) + sizeof(Q_l) + sizeof(Q_c) + sizeof(zigzag_map));
+    gpuScratch = gpuMem.get();
+    dct_device = (float*)(gpuScratch + scratchSize);
+    Q_l_device = ((uint8_t*)dct_device) + sizeof(dct);
+    Q_c_device = Q_l_device + sizeof(Q_l);
+    zigzag_map_device = Q_c_device + sizeof(Q_c);
+    #else
+    wbCheck(cudaMalloc(&gpuScratch, scratchSize));
+    wbCheck(cudaMalloc(&dct_device, sizeof(dct)));
+    wbCheck(cudaMalloc(&Q_l_device, sizeof(Q_l)));
+    wbCheck(cudaMalloc(&Q_c_device, sizeof(Q_c)));
+    wbCheck(cudaMalloc(&zigzag_map_device, sizeof(zigzag_map)));
+    #endif
+
+    wbCheck(cudaMemcpy(dct_device, dct, sizeof(dct), cudaMemcpyHostToDevice));
+    wbCheck(cudaMemcpy(Q_l_device, Q_l, sizeof(Q_l), cudaMemcpyHostToDevice));
+    wbCheck(cudaMemcpy(Q_c_device, Q_c, sizeof(Q_c), cudaMemcpyHostToDevice));
+    wbCheck(cudaMemcpy(zigzag_map_device, zigzag_map, sizeof(zigzag_map), cudaMemcpyHostToDevice));
     
     printf("Input image size: %dx%dx%d\n", imageWidth, imageHeight, imageChannels);
 }
@@ -534,9 +561,16 @@ void Compressor::init_codewords() {
 }
 
 Compressor::~Compressor() {
-#ifdef PAGE_LOCK_HOST_BUFFERS
+    #ifdef PAGE_LOCK_HOST_BUFFERS
     cudaHostUnregister(hostInputImageData);
-#endif
+    #endif
+    #ifndef SINGLE_GPU_BUFFER
+    cudaFree(gpuScratch);
+    cudaFree(dct_device);
+    cudaFree(Q_l_device);
+    cudaFree(Q_c_device);
+    cudaFree(zigzag_map_device);
+    #endif
     wbImage_delete(inputImage);
 }
 
@@ -548,12 +582,7 @@ void Compressor::compress(bool parallel) {
         return;
     }
 
-    constexpr unsigned int NUM_STREAMS = 6;
-    constexpr unsigned int LINES_PER_SLICE = 256;
 
-    size_t bytesPerLine = imageWidth * imageChannels * (sizeof(float) + sizeof(T_Quant));
-
-    DevicePtr<char> gpuScratch((NUM_STREAMS * LINES_PER_SLICE) * bytesPerLine);
     std::vector<void*> scratchBufs;
     std::vector<std::unique_ptr<Stream>> streams;
     for (size_t ii = 0; ii < NUM_STREAMS; ++ii) {
