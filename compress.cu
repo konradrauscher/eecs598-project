@@ -586,7 +586,7 @@ void Compressor::compress(bool parallel) {
     std::vector<void*> scratchBufs;
     std::vector<std::unique_ptr<Stream>> streams;
     for (size_t ii = 0; ii < NUM_STREAMS; ++ii) {
-        scratchBufs.push_back(gpuScratch.get() + bytesPerLine*ii*LINES_PER_SLICE);
+        scratchBufs.push_back(gpuScratch + bytesPerLine*ii*LINES_PER_SLICE);
         streams.emplace_back(new Stream());
     }
 
@@ -765,8 +765,8 @@ void Compressor::parallel_compress_slice(void* gpuScratch, size_t startLine, siz
     wbCheck(cudaMemcpyAsync(deviceRGBImageData, hostInputImageData + startLine*imageWidth*imageChannels, numEl*sizeof(float), cudaMemcpyHostToDevice, stream));
 
     if (combined) {
-        Array<const uint8_t*, 3> Q_tables{ {Q_l_device.get(), Q_c_device.get(), Q_c_device.get()} };
-        kernel_combined<<<DimGrid3, DimBlock3, 0, stream>>>(deviceRGBImageData, deviceZigzagData,  dct_device.get(), Q_tables, zigzag_map_device.get(), imageWidth, numLines);
+        Array<const uint8_t*, 3> Q_tables{ {Q_l_device, Q_c_device, Q_c_device} };
+        kernel_combined<<<DimGrid3, DimBlock3, 0, stream>>>(deviceRGBImageData, deviceZigzagData,  dct_device, Q_tables, zigzag_map_device, imageWidth, numLines);
     }
     else {
         DevicePtr<float> deviceYCbCrImageData(numEl);
@@ -787,17 +787,17 @@ void Compressor::parallel_compress_slice(void* gpuScratch, size_t startLine, siz
         int* deviceCbQuant = deviceYQuant + numPix;
         int* deviceCrQuant = deviceCbQuant + numPix;
 
-        kernel_block_dct<<<DimGrid2, DimBlock2, 0, stream >>>(deviceY,  deviceYDCT,  dct_device.get(), imageWidth, imageHeight);
-        kernel_block_dct<<<DimGrid2, DimBlock2, 0, stream >>>(deviceCb, deviceCbDCT, dct_device.get(), imageWidth, imageHeight);
-        kernel_block_dct<<<DimGrid2, DimBlock2, 0, stream >>>(deviceCr, deviceCrDCT, dct_device.get(), imageWidth, imageHeight);
+        kernel_block_dct<<<DimGrid2, DimBlock2, 0, stream >>>(deviceY,  deviceYDCT,  dct_device, imageWidth, imageHeight);
+        kernel_block_dct<<<DimGrid2, DimBlock2, 0, stream >>>(deviceCb, deviceCbDCT, dct_device, imageWidth, imageHeight);
+        kernel_block_dct<<<DimGrid2, DimBlock2, 0, stream >>>(deviceCr, deviceCrDCT, dct_device, imageWidth, imageHeight);
     
-        kernel_quantize_dct_output<<<DimGrid2, DimBlock2, 0, stream >>>(deviceYDCT,  deviceYQuant,  Q_l_device.get(), imageWidth, imageHeight);
-        kernel_quantize_dct_output<<<DimGrid2, DimBlock2, 0, stream >>>(deviceCbDCT, deviceCbQuant, Q_c_device.get(), imageWidth, imageHeight);
-        kernel_quantize_dct_output<<<DimGrid2, DimBlock2, 0, stream >>>(deviceCrDCT, deviceCrQuant, Q_c_device.get(), imageWidth, imageHeight);
+        kernel_quantize_dct_output<<<DimGrid2, DimBlock2, 0, stream >>>(deviceYDCT,  deviceYQuant,  Q_l_device, imageWidth, imageHeight);
+        kernel_quantize_dct_output<<<DimGrid2, DimBlock2, 0, stream >>>(deviceCbDCT, deviceCbQuant, Q_c_device, imageWidth, imageHeight);
+        kernel_quantize_dct_output<<<DimGrid2, DimBlock2, 0, stream >>>(deviceCrDCT, deviceCrQuant, Q_c_device, imageWidth, imageHeight);
     
-        kernel_zigzag << <DimGrid2, DimBlock2, 0, stream >> > (deviceYQuant,  deviceYZigzag,  zigzag_map_device.get(), imageWidth, imageHeight);
-        kernel_zigzag << <DimGrid2, DimBlock2, 0, stream >> > (deviceCbQuant, deviceCbZigzag, zigzag_map_device.get(), imageWidth, imageHeight);
-        kernel_zigzag << <DimGrid2, DimBlock2, 0, stream >> > (deviceCrQuant, deviceCrZigzag, zigzag_map_device.get(), imageWidth, imageHeight);
+        kernel_zigzag << <DimGrid2, DimBlock2, 0, stream >> > (deviceYQuant,  deviceYZigzag,  zigzag_map_device, imageWidth, imageHeight);
+        kernel_zigzag << <DimGrid2, DimBlock2, 0, stream >> > (deviceCbQuant, deviceCbZigzag, zigzag_map_device, imageWidth, imageHeight);
+        kernel_zigzag << <DimGrid2, DimBlock2, 0, stream >> > (deviceCrQuant, deviceCrZigzag, zigzag_map_device, imageWidth, imageHeight);
     }
 
     size_t memcpySize = imageWidth * numLines * sizeof(*deviceYZigzag);
