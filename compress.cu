@@ -5,6 +5,7 @@
 #include <queue>
 #include <limits>
 #include <algorithm>
+#include <chrono>
 
 #define pi 3.14159265f
 #define sqrt1_2 0.707106781f
@@ -299,6 +300,29 @@ public:
     }
 };
 
+
+class ScopedTimer {
+private:
+    const std::chrono::time_point<std::chrono::high_resolution_clock> mStart;
+    std::string mMsg;
+    int mDepth;
+public:
+    ScopedTimer(const std::string& msg, int depth = 0) :
+        mStart(std::chrono::high_resolution_clock::now()),
+        mMsg(msg),
+        mDepth(depth)
+    {
+    }
+
+    ~ScopedTimer() {
+        std::chrono::duration<double,std::milli> elapsedTime = std::chrono::high_resolution_clock::now() - mStart;
+        for (int i = 0; i < mDepth; ++i) {
+            std::cout << "\t";
+        }
+        std::cout << mMsg << ": " << elapsedTime.count() << " ms" << std::endl;
+    }
+};
+
 // represent a single Huffman code i.e. a sequence of bits with length up to 16
 struct BitCode
 {
@@ -522,7 +546,8 @@ Compressor::Compressor(wbArg_t args, bool _combined, WRITE_ONE_BYTE _output)
     : combined(_combined)
     , bitWriter(_output)
 {
-    wbTime_start(Generic, "Importing data and creating memory on host");
+    ScopedTimer timer("Initialization");
+
     inputImageFile = wbArg_getInputFile(args, 0);
     inputImage = wbImport(inputImageFile);
     imageWidth = wbImage_getWidth(inputImage);
@@ -635,29 +660,31 @@ Compressor::~Compressor() {
 }
 
 void Compressor::compress(bool parallel) {
-
+    ScopedTimer timer("Compression and encoding", 1);
     if (!parallel) {
+        ScopedTimer seqCompTimer("Sequential compression", 2);
         sequential_compress_slice(origInputData, rearrangedData.data(), imageHeight);
-        write_file();
-        return;
+    }
+    else {
+        ScopedTimer parCompTimer("Parallel compression", 2);
+        std::vector<void*> scratchBufs;
+        std::vector<std::unique_ptr<Stream>> streams;
+        for (size_t ii = 0; ii < NUM_STREAMS; ++ii) {
+            scratchBufs.push_back(gpuScratch + bytesPerLine*ii*LINES_PER_SLICE);
+            streams.emplace_back(new Stream());
+        }
+
+        for (size_t startLine = 0, sliceIdx = 0; startLine < imageHeight; startLine += LINES_PER_SLICE, ++sliceIdx) {
+            if (sliceIdx == NUM_STREAMS) sliceIdx = 0;
+            parallel_compress_slice(scratchBufs[sliceIdx], startLine, LINES_PER_SLICE, *streams[sliceIdx]);
+        }
+
+        for (auto& stream : streams) {
+            stream->synchronize();
+        }
     }
 
 
-    std::vector<void*> scratchBufs;
-    std::vector<std::unique_ptr<Stream>> streams;
-    for (size_t ii = 0; ii < NUM_STREAMS; ++ii) {
-        scratchBufs.push_back(gpuScratch + bytesPerLine*ii*LINES_PER_SLICE);
-        streams.emplace_back(new Stream());
-    }
-
-    for (size_t startLine = 0, sliceIdx = 0; startLine < imageHeight; startLine += LINES_PER_SLICE, ++sliceIdx) {
-        if (sliceIdx == NUM_STREAMS) sliceIdx = 0;
-        parallel_compress_slice(scratchBufs[sliceIdx], startLine, LINES_PER_SLICE, *streams[sliceIdx]);
-    }
-
-    for (auto& stream : streams) {
-        stream->synchronize();
-    }
     write_file();
 }
 
@@ -875,6 +902,8 @@ void Compressor::parallel_compress_slice(void* gpuScratch, size_t startLine, siz
 
 
 void Compressor::write_file() {
+    ScopedTimer timer("Encoding",2);
+
     if ((size_t)imageWidth * (size_t)imageHeight <= 1024) {
         for (size_t ii = 0, idx = 0; ii < imageHeight; ++ii) {
             for (size_t jj = 0; jj < imageWidth; ++jj, ++idx) {
@@ -1026,6 +1055,8 @@ void Compressor::write_file() {
 
 
 int main(int argc, char **argv) {
+
+    ScopedTimer timer("Total time");
 
     //To run in parallel, put --parallel at the END of the command line arguments
     int num_args = argc;
