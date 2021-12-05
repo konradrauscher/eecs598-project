@@ -14,8 +14,8 @@
 #define SINGLE_GPU_BUFFER
 #define USE_CONSTANT_MEMORY
 
-using T_Quant = int;
-//using T_Quant = int16_t;
+//using T_Quant = int;
+using T_Quant = int16_t;
 
 
 #ifdef USE_STREAMS
@@ -110,7 +110,7 @@ __global__ void kernel_quantize_dct_output(const float* inputData, T_Quant* outp
     outputData[j * width + i] = (T_Quant) round(inputData[j * width + i] / Q[j_tile*8 + i_tile]);
 }
 
-__global__ void kernel_zigzag(const int* inputData, T_Quant* outputData, const uint8_t* zigzag_map, uint width, uint height) {
+__global__ void kernel_zigzag(const T_Quant* inputData, T_Quant* outputData, const uint8_t* zigzag_map, uint width, uint height) {
     assert(blockDim.x == 8);
     assert(blockDim.y == 8);
 
@@ -685,7 +685,7 @@ void Compressor::sequential_compress_slice(const float* inputData, T_Quant* outp
     sequential_dct(CrData.get(), CrDctData.get(), imageWidth, numLines);
 
     // quantization
-    std::unique_ptr<int[]> 
+    std::unique_ptr<T_Quant[]> 
         YQData(new T_Quant[numPix]),
         CbQData(new T_Quant[numPix]),
         CrQData(new T_Quant[numPix]);
@@ -823,9 +823,9 @@ void Compressor::parallel_compress_slice(void* gpuScratch, size_t startLine, siz
         float* deviceCbDCT = deviceYDCT + numPix;
         float* deviceCrDCT = deviceCbDCT + numPix;
 
-        int* deviceYQuant = deviceQuantData.get();
-        int* deviceCbQuant = deviceYQuant + numPix;
-        int* deviceCrQuant = deviceCbQuant + numPix;
+        T_Quant* deviceYQuant = deviceQuantData.get();
+        T_Quant* deviceCbQuant = deviceYQuant + numPix;
+        T_Quant* deviceCrQuant = deviceCbQuant + numPix;
 
         kernel_block_dct<<<DimGrid2, DimBlock2, 0, stream >>>(deviceY,  deviceYDCT,  dct_device, imageWidth, imageHeight);
         kernel_block_dct<<<DimGrid2, DimBlock2, 0, stream >>>(deviceCb, deviceCbDCT, dct_device, imageWidth, imageHeight);
