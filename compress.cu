@@ -4,6 +4,7 @@
 #include <functional>
 #include <queue>
 #include <limits>
+#include <algorithm>
 
 #define pi 3.14159265f
 #define sqrt1_2 0.707106781f
@@ -13,9 +14,16 @@
 #define USE_STREAMS
 #define SINGLE_GPU_BUFFER
 #define USE_CONSTANT_MEMORY
+#define INPUT_TO_CHAR
 
 //using T_Quant = int;
 using T_Quant = int16_t;
+
+#ifdef INPUT_TO_CHAR
+using T_Input = uint8_t;
+#else
+using T_Input = float;
+#endif
 
 
 #ifdef USE_STREAMS
@@ -42,15 +50,21 @@ using WRITE_ONE_BYTE = std::function<void(unsigned char)>;
 
 
 // Naive kernel with no optimization for coalescing
-__global__ void kernel_rgb_to_ycbcr(const float* input, float* output_y, float* output_cb, float* output_cr, uint num_rgb_pix){
+__global__ void kernel_rgb_to_ycbcr(const T_Input* input, float* output_y, float* output_cb, float* output_cr, uint num_rgb_pix){
     
         uint idx = blockIdx.x * blockDim.x + threadIdx.x;
 
         if(idx >=  num_rgb_pix) return;
 
-        float r = input[idx*3]     * 255.f;
-        float g = input[idx*3 + 1] * 255.f;
-        float b = input[idx*3 + 2] * 255.f;
+	#ifdef INPUT_TO_CHAR
+        float scale = 1.f;
+	#else
+        float scale = 255.f;
+	#endif
+
+        float r = input[idx*3]     * scale;
+        float g = input[idx*3 + 1] * scale;
+        float b = input[idx*3 + 2] * scale;
 
         output_y[idx]  =  0.f  + (0.299f   * r) + (0.587f   * g) + (0.114f   * b) - 128.f;
         output_cb[idx] = 128.f - (0.16874f * r) - (0.33126f * g) + (0.5f     * b) - 128.f;
@@ -141,7 +155,7 @@ __constant__ uint8_t Q_c_constant[64];
 __constant__ uint8_t zigzag_map_constant[64];
 #endif
 
-__global__ void kernel_combined(const float* inputData, T_Quant* outputData, 
+__global__ void kernel_combined(const T_Input* inputData, T_Quant* outputData, 
     #ifndef USE_CONSTANT_MEMORY
     const float* dct, Array<const uint8_t*,3> Q, const uint8_t* zigzag_map, 
     #endif
@@ -170,7 +184,11 @@ __global__ void kernel_combined(const float* inputData, T_Quant* outputData,
 
     // Load data and convert RGB to YCbCr
     // The input accesses can still be coalesced here
-    blockInputData[chan_idx][j_tile][i_tile] = inputData[j * width * 3 + i * 3 + chan_idx] * 255.f;
+    blockInputData[chan_idx][j_tile][i_tile] = inputData[j * width * 3 + i * 3 + chan_idx] 
+    #ifndef INPUT_TO_CHAR
+    * 255.f
+    #endif
+    ;
 
     __syncthreads();
 
@@ -462,7 +480,8 @@ private:
     uint32_t imageWidth;
     uint32_t imageHeight;
     uint32_t imageChannels;
-    float* hostInputImageData;
+    float* origInputData;
+    T_Input* hostInputImageData;
     size_t bytesPerLine;
     
     // Huffman tables for lookup during encoding
@@ -509,7 +528,14 @@ Compressor::Compressor(wbArg_t args, bool _combined, WRITE_ONE_BYTE _output)
     imageWidth = wbImage_getWidth(inputImage);
     imageHeight = wbImage_getHeight(inputImage);
     imageChannels = wbImage_getChannels(inputImage);
+    size_t numPixels = imageWidth * imageHeight * imageChannels;
+    origInputData = wbImage_getData(inputImage);
+    #ifdef INPUT_TO_CHAR
+    hostInputImageData = new T_Input[numPixels];
+    std::transform(origInputData, origInputData + numPixels, hostInputImageData, [](float f){return T_Input(f*255.f);});
+    #else
     hostInputImageData = wbImage_getData(inputImage);
+    #endif
     wbTime_stop(Generic, "Importing data and creating memory on host");
 
     if (imageChannels != 3) ERROR("Image must have three channels");
@@ -534,7 +560,7 @@ Compressor::Compressor(wbArg_t args, bool _combined, WRITE_ONE_BYTE _output)
 
     init_codewords();
 
-    bytesPerLine = imageWidth * imageChannels * (sizeof(float) + sizeof(T_Quant));
+    bytesPerLine = imageWidth * imageChannels * (sizeof(T_Input) + sizeof(T_Quant));
     size_t scratchSize = (NUM_STREAMS * LINES_PER_SLICE) * bytesPerLine;
     #ifdef SINGLE_GPU_BUFFER
     gpuMem.reset(scratchSize
@@ -611,7 +637,7 @@ Compressor::~Compressor() {
 void Compressor::compress(bool parallel) {
 
     if (!parallel) {
-        sequential_compress_slice(hostInputImageData, rearrangedData.data(), imageHeight);
+        sequential_compress_slice(origInputData, rearrangedData.data(), imageHeight);
         write_file();
         return;
     }
@@ -662,9 +688,9 @@ void Compressor::sequential_compress_slice(const float* inputData, T_Quant* outp
 
     for (size_t i = 0; i < numPix; i++) {
 
-        unsigned char r = (unsigned char) (255 * hostInputImageData[3*i + 0]);
-        unsigned char g = (unsigned char) (255 * hostInputImageData[3*i + 1]);
-        unsigned char b = (unsigned char) (255 * hostInputImageData[3*i + 2]);
+        unsigned char r = (unsigned char) (255 * inputData[3*i + 0]);
+        unsigned char g = (unsigned char) (255 * inputData[3*i + 1]);
+        unsigned char b = (unsigned char) (255 * inputData[3*i + 2]);
 
         YData[i]  = 0   + (0.299   * r) + (0.587   * g) + (0.114   * b) - 128;
         CbData[i] = 128 - (0.16874 * r) - (0.33126 * g) + (0.5     * b) - 128;
@@ -780,7 +806,7 @@ void Compressor::parallel_compress_slice(void* gpuScratch, size_t startLine, siz
 
     //DevicePtr<float> deviceRGBImageData(numEl);
     //DevicePtr<T_Quant> deviceZigzagData(numEl);
-    float* deviceRGBImageData = (float*)gpuScratch;
+    T_Input* deviceRGBImageData = (T_Input*)gpuScratch;
     T_Quant* deviceZigzagData = (T_Quant*)(deviceRGBImageData + numEl);
 
     T_Quant* deviceYZigzag = deviceZigzagData;
@@ -796,7 +822,7 @@ void Compressor::parallel_compress_slice(void* gpuScratch, size_t startLine, siz
     dim3 DimGrid3((imageWidth - 1) / 8 + 1, (numLines - 1) / 8 + 1, 1);
     dim3 DimBlock3(8, 8, 3);
 
-    wbCheck(cudaMemcpyAsync(deviceRGBImageData, hostInputImageData + startLine*imageWidth*imageChannels, numEl*sizeof(float), cudaMemcpyHostToDevice, stream));
+    wbCheck(cudaMemcpyAsync(deviceRGBImageData, hostInputImageData + startLine*imageWidth*imageChannels, numEl*sizeof(T_Input), cudaMemcpyHostToDevice, stream));
 
     if (combined) {
         #ifndef USE_CONSTANT_MEMORY
