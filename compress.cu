@@ -6,6 +6,7 @@
 #include <limits>
 #include <algorithm>
 #include <chrono>
+#include <nvjpeg.h>
 
 #define pi 3.14159265f
 #define sqrt1_2 0.707106781f
@@ -16,6 +17,9 @@
 #define SINGLE_GPU_BUFFER
 #define USE_CONSTANT_MEMORY
 #define INPUT_TO_CHAR
+
+//For comparison with state of the art
+#define USE_NVJPEG
 
 //using T_Quant = int;
 using T_Quant = int16_t;
@@ -44,6 +48,49 @@ using WRITE_ONE_BYTE = std::function<void(unsigned char)>;
     cudaError_t err = stmt;                                               \
     if (err != cudaSuccess) {                                             \
       wbLog(ERROR, "CUDA error: ", cudaGetErrorString(err));              \
+      wbLog(ERROR, "Failed to run stmt ", #stmt);                         \
+      exit(-1);                                                           \
+    }                                                                     \
+  } while (0)
+
+//http://web.engr.oregonstate.edu/~mjb/cs575/Projects/helper_cuda.h
+static const char* getNvJpegErrStr(nvjpegStatus_t error) {
+    switch (error) {
+    case NVJPEG_STATUS_SUCCESS:
+        return "NVJPEG_STATUS_SUCCESS";
+
+    case NVJPEG_STATUS_NOT_INITIALIZED:
+        return "NVJPEG_STATUS_NOT_INITIALIZED";
+
+    case NVJPEG_STATUS_INVALID_PARAMETER:
+        return "NVJPEG_STATUS_INVALID_PARAMETER";
+
+    case NVJPEG_STATUS_BAD_JPEG:
+        return "NVJPEG_STATUS_BAD_JPEG";
+
+    case NVJPEG_STATUS_JPEG_NOT_SUPPORTED:
+        return "NVJPEG_STATUS_JPEG_NOT_SUPPORTED";
+
+    case NVJPEG_STATUS_ALLOCATOR_FAILURE:
+        return "NVJPEG_STATUS_ALLOCATOR_FAILURE";
+
+    case NVJPEG_STATUS_EXECUTION_FAILED:
+        return "NVJPEG_STATUS_EXECUTION_FAILED";
+
+    case NVJPEG_STATUS_ARCH_MISMATCH:
+        return "NVJPEG_STATUS_ARCH_MISMATCH";
+
+    case NVJPEG_STATUS_INTERNAL_ERROR:
+        return "NVJPEG_STATUS_INTERNAL_ERROR";
+    }
+
+    return "<unknown>";
+}
+#define checkNvJpeg(stmt)                                                 \
+  do {                                                                    \
+    nvjpegStatus_t err = stmt;                                            \
+    if (err != NVJPEG_STATUS_SUCCESS) {                                             \
+      wbLog(ERROR, "NVJPEG error: ", getNvJpegErrStr(err));              \
       wbLog(ERROR, "Failed to run stmt ", #stmt);                         \
       exit(-1);                                                           \
     }                                                                     \
@@ -537,6 +584,7 @@ public:
     void sequential_compress_slice(const float* inputData, T_Quant* outputData[3], size_t numLines);
     void parallel_compress_slice(void* gpuScratch, size_t startLine, size_t numLines, cudaStream_t stream);
     void compress(bool parallel);
+    void compress_nvjpeg(std::vector<unsigned char>& output);
     size_t getNumPixels() const {
         return (size_t)imageWidth * (size_t)imageHeight;
     }
@@ -555,7 +603,7 @@ Compressor::Compressor(wbArg_t args, bool _combined, WRITE_ONE_BYTE _output)
     imageChannels = wbImage_getChannels(inputImage);
     size_t numPixels = imageWidth * imageHeight * imageChannels;
     origInputData = wbImage_getData(inputImage);
-    #ifdef INPUT_TO_CHAR
+    #if defined(INPUT_TO_CHAR) || defined(USE_NVJPEG)
     hostInputImageData = new T_Input[numPixels];
     std::transform(origInputData, origInputData + numPixels, hostInputImageData, [](float f){return T_Input(f*255.f);});
     #else
@@ -1053,6 +1101,44 @@ void Compressor::write_file() {
     bitWriter << 0xFF << 0xD9;
 }
 
+void Compressor::compress_nvjpeg(std::vector<unsigned char>& output) {
+    
+    #ifdef USE_NVJPEG
+
+    ScopedTimer("Encoding with NVJPEG", 1);
+
+    nvjpegHandle_t nv_handle;
+    nvjpegEncoderState_t nv_enc_state;
+    nvjpegEncoderParams_t nv_enc_params;
+    cudaStream_t stream = cudaStreamDefault;
+
+    // initialize nvjpeg structures
+    checkNvJpeg(nvjpegCreateSimple(&nv_handle));
+    checkNvJpeg(nvjpegEncoderStateCreate(nv_handle, &nv_enc_state, stream));
+    checkNvJpeg(nvjpegEncoderParamsCreate(nv_handle, &nv_enc_params, stream));
+
+    nvjpegImage_t nv_image;
+    nv_image.channel[0] = hostInputImageData;
+    nv_image.pitch[0] = imageWidth * imageChannels;
+
+    // Compress image
+    checkNvJpeg(nvjpegEncodeImage(nv_handle, nv_enc_state, nv_enc_params,
+        &nv_image, NVJPEG_INPUT_RGB, imageWidth, imageHeight, stream));
+
+    // get compressed stream size
+    size_t length;
+    checkNvJpeg(nvjpegEncodeRetrieveBitstream(nv_handle, nv_enc_state, NULL, &length, stream));
+    // get stream itself
+    wbCheck(cudaStreamSynchronize(stream));
+    output.resize(length);
+    checkNvJpeg(nvjpegEncodeRetrieveBitstream(nv_handle, nv_enc_state, output.data(), &length, stream));
+    wbCheck(cudaStreamSynchronize(stream));
+
+    #else
+    (void)output;
+    ERROR("compress_nvjpeg must be enabled by #define USE_NVJPEG and T_Input=uint8_t");
+    #endif
+}
 
 int main(int argc, char **argv) {
 
