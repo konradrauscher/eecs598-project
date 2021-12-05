@@ -11,6 +11,7 @@
 #define PAGE_LOCK_HOST_BUFFERS
 #define USE_STREAMS
 #define SINGLE_GPU_BUFFER
+#define USE_CONSTANT_MEMORY
 
 using T_Quant = int;
 //using T_Quant = int16_t;
@@ -132,8 +133,25 @@ struct Array {
     }
 };
 
-__global__ void kernel_combined(const float* inputData, T_Quant* outputData, const float* dct, Array<const uint8_t*,3> Q, const uint8_t* zigzag_map, uint width, uint height) {
+#ifdef USE_CONSTANT_MEMORY
+__constant__ float dct_constant[64];
+__constant__ uint8_t Q_l_constant[64];
+__constant__ uint8_t Q_c_constant[64];
+__constant__ uint8_t zigzag_map_constant[64];
+#endif
+
+__global__ void kernel_combined(const float* inputData, T_Quant* outputData, 
+    #ifndef USE_CONSTANT_MEMORY
+    const float* dct, Array<const uint8_t*,3> Q, const uint8_t* zigzag_map, 
+    #endif
+    uint width, uint height) {
    
+    #ifdef USE_CONSTANT_MEMORY
+    const float* dct = dct_constant;
+    const uint8_t* Q[3] = { Q_l_constant, Q_c_constant, Q_c_constant };
+    const uint8_t* zigzag_map = zigzag_map_constant;
+    #endif
+
     assert(blockDim.x == 8);
     assert(blockDim.y == 8);
     assert(blockDim.z == 3);
@@ -518,24 +536,40 @@ Compressor::Compressor(wbArg_t args, bool _combined, WRITE_ONE_BYTE _output)
     bytesPerLine = imageWidth * imageChannels * (sizeof(float) + sizeof(T_Quant));
     size_t scratchSize = (NUM_STREAMS * LINES_PER_SLICE) * bytesPerLine;
     #ifdef SINGLE_GPU_BUFFER
-    gpuMem.reset(scratchSize + sizeof(dct) + sizeof(Q_l) + sizeof(Q_c) + sizeof(zigzag_map));
+    gpuMem.reset(scratchSize
+        #ifndef USE_CONSTANT_MEMORY
+        + sizeof(dct) + sizeof(Q_l) + sizeof(Q_c) + sizeof(zigzag_map)
+        #endif
+    );
     gpuScratch = gpuMem.get();
+    #ifndef USE_CONSTANT_MEMORY
     dct_device = (float*)(gpuScratch + scratchSize);
     Q_l_device = ((uint8_t*)dct_device) + sizeof(dct);
     Q_c_device = Q_l_device + sizeof(Q_l);
     zigzag_map_device = Q_c_device + sizeof(Q_c);
-    #else
+    #endif // USE_CONSTANT_MEMORY
+    #else // SINGLE_GPU_BUFFER
     wbCheck(cudaMalloc(&gpuScratch, scratchSize));
+    #ifndef USE_CONSTANT_MEMORY
     wbCheck(cudaMalloc(&dct_device, sizeof(dct)));
     wbCheck(cudaMalloc(&Q_l_device, sizeof(Q_l)));
     wbCheck(cudaMalloc(&Q_c_device, sizeof(Q_c)));
     wbCheck(cudaMalloc(&zigzag_map_device, sizeof(zigzag_map)));
-    #endif
+    #endif // USE_CONSTANT_MEMORY
+    #endif // SINGLE_GPU_BUFFER
 
+    #ifdef USE_CONSTANT_MEMORY
+
+    wbCheck(cudaMemcpyToSymbol(dct_constant, dct, sizeof(dct)));
+    wbCheck(cudaMemcpyToSymbol(Q_l_constant, Q_l, sizeof(Q_l)));
+    wbCheck(cudaMemcpyToSymbol(Q_c_constant, Q_c, sizeof(Q_c)));
+    wbCheck(cudaMemcpyToSymbol(zigzag_map_constant, zigzag_map, sizeof(zigzag_map)));
+    #else
     wbCheck(cudaMemcpy(dct_device, dct, sizeof(dct), cudaMemcpyHostToDevice));
     wbCheck(cudaMemcpy(Q_l_device, Q_l, sizeof(Q_l), cudaMemcpyHostToDevice));
     wbCheck(cudaMemcpy(Q_c_device, Q_c, sizeof(Q_c), cudaMemcpyHostToDevice));
     wbCheck(cudaMemcpy(zigzag_map_device, zigzag_map, sizeof(zigzag_map), cudaMemcpyHostToDevice));
+    #endif
     
     printf("Input image size: %dx%dx%d\n", imageWidth, imageHeight, imageChannels);
 }
