@@ -546,7 +546,7 @@ Compressor::Compressor(wbArg_t args, bool _combined, WRITE_ONE_BYTE _output)
     : combined(_combined)
     , bitWriter(_output)
 {
-    ScopedTimer timer("Initialization");
+    ScopedTimer timer("Initialization", 1);
 
     inputImageFile = wbArg_getInputFile(args, 0);
     inputImage = wbImport(inputImageFile);
