@@ -8,6 +8,7 @@
 #define pi 3.14159265f
 #define sqrt1_2 0.707106781f
 
+#define USE_COMBINED_KERNEL
 #define PAGE_LOCK_HOST_BUFFERS
 #define USE_STREAMS
 #define SINGLE_GPU_BUFFER
@@ -188,7 +189,7 @@ __global__ void kernel_combined(const float* inputData, T_Quant* outputData,
     float* conv = &conversion_matrix[chan_idx][0];
 
     blockInputData[chan_idx][j_tile][i_tile] =
-        conv[0] + conv[1] * rgb[0] + conv[2] * rgb[1] + conv[3] * rgb[2];
+        conv[0] + conv[1] * rgb[0] + conv[2] * rgb[1] + conv[3] * rgb[2] - 128.f;
 
     __syncthreads();
     
@@ -214,7 +215,7 @@ __global__ void kernel_combined(const float* inputData, T_Quant* outputData,
     }
 
     float dct_temp = 0.25 * c_i * c_j * sum;
-    outputData[chan_idx * block_num * 64 + zigzag_map[tile_num]] = (T_Quant) roundf(dct_temp / Q[chan_idx][j_tile*8 + i_tile]);
+    outputData[chan_idx * width * height + block_num * 64 + zigzag_map[tile_num]] = (T_Quant) roundf(dct_temp / Q[chan_idx][j_tile*8 + i_tile]);
 }
 
 template<typename T>
@@ -597,11 +598,13 @@ Compressor::~Compressor() {
     #endif
     #ifndef SINGLE_GPU_BUFFER
     cudaFree(gpuScratch);
+    #ifndef USE_CONSTANT_MEMORY
     cudaFree(dct_device);
     cudaFree(Q_l_device);
     cudaFree(Q_c_device);
     cudaFree(zigzag_map_device);
-    #endif
+    #endif //USE_CONSTANT_MEMORY
+    #endif // SINGLE_GPU_BUFFER
     wbImage_delete(inputImage);
 }
 
@@ -796,8 +799,14 @@ void Compressor::parallel_compress_slice(void* gpuScratch, size_t startLine, siz
     wbCheck(cudaMemcpyAsync(deviceRGBImageData, hostInputImageData + startLine*imageWidth*imageChannels, numEl*sizeof(float), cudaMemcpyHostToDevice, stream));
 
     if (combined) {
+        #ifndef USE_CONSTANT_MEMORY
         Array<const uint8_t*, 3> Q_tables{ {Q_l_device, Q_c_device, Q_c_device} };
-        kernel_combined<<<DimGrid3, DimBlock3, 0, stream>>>(deviceRGBImageData, deviceZigzagData,  dct_device, Q_tables, zigzag_map_device, imageWidth, numLines);
+        #endif
+        kernel_combined<<<DimGrid3, DimBlock3, 0, stream>>>(deviceRGBImageData, deviceZigzagData, 
+        #ifndef USE_CONSTANT_MEMORY
+            dct_device, Q_tables, zigzag_map_device, 
+        #endif
+            imageWidth, numLines);
     }
     else {
         DevicePtr<float> deviceYCbCrImageData(numEl);
@@ -995,18 +1004,16 @@ int main(int argc, char **argv) {
     //To run in parallel, put --parallel at the END of the command line arguments
     int num_args = argc;
     bool parallel = false;
-    bool combined = false;
+    #ifdef USE_COMBINED_KERNEL
+    bool combined = true;
+    #else
+    bool combined  = false;
+    #endif
     for (int i = 0; i < argc; i++) {
         if (!strcmp(argv[i], "--parallel")) {
             parallel = true;
             num_args -= 1;
             printf("\tRunning Parallel version\n");
-        }
-        if (!strcmp(argv[i], "--combined")) {
-            combined = true;
-            num_args -= 1;
-            printf("\tRunning combined kernel version\n");
-
         }
     }
 
