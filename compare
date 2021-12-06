@@ -18,7 +18,8 @@ export LD_LIBRARY_PATH=$PWD/libwb/build/:$LD_LIBRARY_PATH
 TESTNUM=$1
 
 echo "running sequential..."
-nvprof --cpu-profiling on ./parallel.out -i test/$TESTNUM/input.ppm -o test/$TESTNUM/attempt_seq.jpg -t image 
+#nvprof --cpu-profiling on 
+./parallel.out -i test/$TESTNUM/input.ppm -o test/$TESTNUM/attempt_seq.jpg -t image 
 echo "running parallel..."
-nvprof --cpu-profiling on ./parallel.out -i test/$TESTNUM/input.ppm -o test/$TESTNUM/attempt_par.jpg -t image --parallel
+./parallel.out -i test/$TESTNUM/input.ppm -o test/$TESTNUM/attempt_par.jpg -t image --parallel
 diff test/$TESTNUM/attempt_seq.jpg test/$TESTNUM/attempt_par.jpg
