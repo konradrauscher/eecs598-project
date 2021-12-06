@@ -1105,25 +1105,35 @@ void Compressor::compress_nvjpeg(std::vector<unsigned char>& output) {
     
     #ifdef USE_NVJPEG
 
-    ScopedTimer("Encoding with NVJPEG", 1);
-
     nvjpegHandle_t nv_handle;
     nvjpegEncoderState_t nv_enc_state;
     nvjpegEncoderParams_t nv_enc_params;
-    cudaStream_t stream = cudaStreamDefault;
+    cudaStream_t stream = cudaStreamDefault; 
+
+    DevicePtr<uint8_t> deviceInputData(imageWidth*imageHeight*imageChannels);
 
     // initialize nvjpeg structures
     checkNvJpeg(nvjpegCreateSimple(&nv_handle));
+    ScopedTimer timer("Encoding with NVJPEG", 1);
+
+    wbCheck(cudaMemcpy(deviceInputData.get(), hostInputImageData, imageWidth*imageHeight*imageChannels, cudaMemcpyHostToDevice));
+    
     checkNvJpeg(nvjpegEncoderStateCreate(nv_handle, &nv_enc_state, stream));
     checkNvJpeg(nvjpegEncoderParamsCreate(nv_handle, &nv_enc_params, stream));
 
+    checkNvJpeg(nvjpegEncoderParamsSetQuality(nv_enc_params, 50, stream));
+    checkNvJpeg(nvjpegEncoderParamsSetSamplingFactors(nv_enc_params, NVJPEG_CSS_444, stream)); 
     nvjpegImage_t nv_image;
-    nv_image.channel[0] = hostInputImageData;
+    for (int c = 0; c < NVJPEG_MAX_COMPONENT; c++) {
+      nv_image.channel[c] = NULL;
+      nv_image.pitch[c] = 0;
+    }
+    nv_image.channel[0] = deviceInputData.get();
     nv_image.pitch[0] = imageWidth * imageChannels;
 
     // Compress image
     checkNvJpeg(nvjpegEncodeImage(nv_handle, nv_enc_state, nv_enc_params,
-        &nv_image, NVJPEG_INPUT_RGB, imageWidth, imageHeight, stream));
+        &nv_image, NVJPEG_INPUT_RGBI, imageWidth, imageHeight, stream));
 
     // get compressed stream size
     size_t length;
@@ -1133,7 +1143,7 @@ void Compressor::compress_nvjpeg(std::vector<unsigned char>& output) {
     output.resize(length);
     checkNvJpeg(nvjpegEncodeRetrieveBitstream(nv_handle, nv_enc_state, output.data(), &length, stream));
     wbCheck(cudaStreamSynchronize(stream));
-
+    wbCheck(cudaDeviceSynchronize());
     #else
     (void)output;
     ERROR("compress_nvjpeg must be enabled by #define USE_NVJPEG and T_Input=uint8_t");
@@ -1180,6 +1190,8 @@ int main(int argc, char **argv) {
     outputFile.write((const char*)outputData.data(), outputData.size());
 
     outputFile.close();
-
+    
+    compressor->compress_nvjpeg(outputData);
+    
     return 0;
 }
