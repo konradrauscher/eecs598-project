@@ -553,6 +553,7 @@ private:
     uint32_t imageHeight;
     uint32_t imageChannels;
     float* origInputData;
+    uint8_t* charInputData;
     T_Input* hostInputImageData;
     size_t bytesPerLine;
     
@@ -606,10 +607,15 @@ Compressor::Compressor(wbArg_t args, bool _combined, WRITE_ONE_BYTE _output)
     size_t numPixels = imageWidth * imageHeight * imageChannels;
     origInputData = wbImage_getData(inputImage);
     #if defined(INPUT_TO_CHAR) || defined(USE_NVJPEG) || defined(USE_JPEGLIB)
-    hostInputImageData = new T_Input[numPixels];
-    std::transform(origInputData, origInputData + numPixels, hostInputImageData, [](float f){return T_Input(f*255.f);});
+    charInputData = new uint8_t[numPixels];
+    std::transform(origInputData, origInputData + numPixels, charInputData, [](float f){return uint8_t(f*255.f);});
     #else
-    hostInputImageData = wbImage_getData(inputImage);
+    charInputData = nullptr;
+    #endif
+    #ifdef INPUT_TO_CHAR
+    hostInputImageData = charInputData;
+    #else
+    hostInputImageData = origInputData;
     #endif
     wbTime_stop(Generic, "Importing data and creating memory on host");
 
@@ -966,7 +972,7 @@ void Compressor::write_file() {
             printf("\n\n");
        }
     }
-
+    fflush(stdout);
     const uint8_t HeaderJfif[2 + 2 + 16] = {
         0xFF,0xD8,          // SOI marker (start of image)
         0xFF,0xE0,          // JFIF APP0 tag
@@ -1282,7 +1288,9 @@ int main(int argc, char **argv) {
             printf("\tRunning Parallel version\n");
         }
     }
-
+    #ifdef OPT_LIST
+    printf("Optimizations: " OPT_LIST "\n");
+    #endif
     wbArg_t args = wbArg_read(num_args, argv);
 
     std::ofstream outputFile;

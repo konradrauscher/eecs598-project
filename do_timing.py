@@ -4,7 +4,8 @@ import tempfile
 import time
 import subprocess
 
-TESTNUM = 0
+CLEANUP = False
+TESTNUM = 3
 OPTS = \
 [
     'USE_COMBINED_KERNEL',
@@ -19,7 +20,7 @@ NOPTS = len(OPTS)
 PWD = os.getcwd()
 
 RUN_COMMAND = f'./parallel.out.%d -i test/{TESTNUM}/input.ppm -o test/{TESTNUM}/attempt_seq.jpg -t image --parallel '
-COMPILE_STEM = f'nvcc compress.cu -L{PWD}/libwb/build/ -o parallel.out.%d -I {PWD}/libwb/ -std=c++11 -lwb -lnvjpeg -ljpeg-O3 -g '
+COMPILE_STEM = f'nvcc compress.cu -L{PWD}/libwb/build/ -o parallel.out.%d -I {PWD}/libwb/ -std=c++11 -lwb -lnvjpeg -ljpeg -O3 -g '
 with open('sbatch_template') as f:
     SBATCH_TEMPLATE = f.read()
 #runfile_text = SBATCH_TEMPLATE + '\n' + RUN_COMMAND
@@ -34,7 +35,7 @@ output_files = []
 
 for ii in range(NOPTS+1):
     opts = OPTS[:ii]
-    compile_command = (COMPILE_STEM%ii) +  ' '.join('-D'+o for o in opts)
+    compile_command = (COMPILE_STEM%ii) +  ' '.join('-D'+o for o in opts) + ' -DOPT_LIST="' + '___'.join(opts) + '"'
     print('\n'.join(opts))
 
     print(compile_command)
@@ -60,7 +61,7 @@ while not os.path.exists(output_files[-1]):
   time.sleep(1)
 
 for opts, outfile in zip(all_opts, output_files):
-    print("Optimizations: " + ' '.join(opts))
+    #print("Optimizations: " + ' '.join(opts))
     with open(outfile) as f:
         print(f.read())
-    os.remove(outfile)
+    if CLEANUP: os.remove(outfile)

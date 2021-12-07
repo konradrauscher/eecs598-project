@@ -13,3 +13,4 @@
 #SBATCH --gpus-per-node=1
 
 export LD_LIBRARY_PATH=$PWD/libwb/build/:$LD_LIBRARY_PATH
+ulimit -c 0
