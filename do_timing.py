@@ -60,7 +60,7 @@ while not os.path.exists(output_files[-1]):
   time.sleep(1)
 
 for opts, outfile in zip(all_opts, output_files):
-    print("Optimizations: " + ' '.join(OPTS))
+    print("Optimizations: " + ' '.join(opts))
     with open(outfile) as f:
         print(f.read())
     os.remove(outfile)
