@@ -19,7 +19,7 @@ NOPTS = len(OPTS)
 PWD = os.getcwd()
 
 RUN_COMMAND = f'./parallel.out.%d -i test/{TESTNUM}/input.ppm -o test/{TESTNUM}/attempt_seq.jpg -t image --parallel '
-COMPILE_STEM = f'nvcc compress.cu -L{PWD}/libwb/build/ -o parallel.out.%d -I {PWD}/libwb/ -std=c++11 -lwb -lnvjpeg -O3 -g '
+COMPILE_STEM = f'nvcc compress.cu -L{PWD}/libwb/build/ -o parallel.out.%d -I {PWD}/libwb/ -std=c++11 -lwb -lnvjpeg -ljpeg-O3 -g '
 with open('sbatch_template') as f:
     SBATCH_TEMPLATE = f.read()
 #runfile_text = SBATCH_TEMPLATE + '\n' + RUN_COMMAND
