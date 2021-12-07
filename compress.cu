@@ -14,6 +14,7 @@
 
 /*#define USE_COMBINED_KERNEL
 #define PAGE_LOCK_HOST_BUFFERS
+#define COALESCE_GLOBAL_ACCESSES
 #define USE_STREAMS
 #define SINGLE_GPU_BUFFER
 #define USE_CONSTANT_MEMORY
@@ -220,7 +221,10 @@ __global__ void kernel_combined(const T_Input* inputData, T_Quant* outputData,
     assert(blockDim.y == 8);
     assert(blockDim.z == 3);
 
-    __shared__ float blockInputData[3][8][8];
+    __shared__ union {
+        float blockInputData[8][8][3];
+        T_Quant blockOutputData[3][8][8];
+    } smem;
 
     uint i_block = blockIdx.x, j_block = blockIdx.y;
     uint i_tile = threadIdx.x, j_tile = threadIdx.y;
@@ -231,9 +235,20 @@ __global__ void kernel_combined(const T_Input* inputData, T_Quant* outputData,
     
     if (i >= width || j >= height) return;
 
+    uint threadIdxFlat = threadIdx.z * 8 * 8 +
+        threadIdx.y * 8 +
+        threadIdx.x;
+    uint blockRowNum = threadIdxFlat / 24;
+    uint blockColNum = threadIdxFlat % 24;
+    uint rowNum = j_block * 8 + blockRowNum;
+    uint colNum = i_block * 8 * 3 + blockColNum;
     // Load data and convert RGB to YCbCr
     // The input accesses can still be coalesced here
-    blockInputData[chan_idx][j_tile][i_tile] = inputData[j * width * 3 + i * 3 + chan_idx] 
+    #ifdef COALESCE_GLOBAL_ACCESSES
+    ((float*)smem.blockInputData)[threadIdxFlat] = inputData[rowNum * width * 3 + colNum]
+    #else
+    smem.blockInputData[j_tile][i_tile][chan_idx] = inputData[j * width * 3 + i * 3 + chan_idx] 
+    #endif
     #ifndef INPUT_TO_CHAR
     * 255.f
     #endif
@@ -243,7 +258,7 @@ __global__ void kernel_combined(const T_Input* inputData, T_Quant* outputData,
 
     float rgb[3];
     for (int ii = 0; ii < 3; ++ ii) {
-        rgb[ii] = blockInputData[ii][j_tile][i_tile];
+        rgb[ii] = smem.blockInputData[j_tile][i_tile][ii];
     }
 
     __syncthreads();
@@ -255,7 +270,7 @@ __global__ void kernel_combined(const T_Input* inputData, T_Quant* outputData,
     };
     float* conv = &conversion_matrix[chan_idx][0];
 
-    blockInputData[chan_idx][j_tile][i_tile] =
+    smem.blockInputData[j_tile][i_tile][chan_idx] =
         conv[0] + conv[1] * rgb[0] + conv[2] * rgb[1] + conv[3] * rgb[2] - 128.f;
 
     __syncthreads();
@@ -277,12 +292,21 @@ __global__ void kernel_combined(const T_Input* inputData, T_Quant* outputData,
             float cos1 = dct[i_sum*8 + i_tile];
             float cos2 = dct[j_sum*8 + j_tile];
 
-            sum += (blockInputData[chan_idx][j_sum][i_sum] * cos1 * cos2);
+            sum += (smem.blockInputData[j_sum][i_sum][chan_idx] * cos1 * cos2);
         }
     }
 
     float dct_temp = 0.25 * c_i * c_j * sum;
-    outputData[chan_idx * width * height + block_num * 64 + zigzag_map[tile_num]] = (T_Quant) roundf(dct_temp / Q[chan_idx][j_tile*8 + i_tile]);
+    T_Quant quant = (T_Quant) roundf(dct_temp / Q[chan_idx][j_tile*8 + i_tile]);
+    #ifdef COALESCE_GLOBAL_ACCESSES
+    __syncthreads();
+    ((T_Quant*)smem.blockOutputData[chan_idx])[zigzag_map[tile_num]] = quant; 
+    __syncthreads();
+    outputData[chan_idx * width * height + block_num * 64 + tile_num] = 
+        smem.blockOutputData[chan_idx][j_tile][i_tile];
+    #else
+    outputData[chan_idx * width * height + block_num * 64 + zigzag_map[tile_num]] = quant;
+    #endif
 }
 
 template<typename T>
@@ -1125,7 +1149,7 @@ void Compressor::compress_nvjpeg(std::vector<unsigned char>& output) {
     checkNvJpeg(nvjpegCreateSimple(&nv_handle));
     ScopedTimer timer("Encoding with NVJPEG", 1);
 
-    wbCheck(cudaMemcpy(deviceInputData.get(), hostInputImageData, imageWidth*imageHeight*imageChannels, cudaMemcpyHostToDevice));
+    wbCheck(cudaMemcpy(deviceInputData.get(), charInputData, imageWidth*imageHeight*imageChannels, cudaMemcpyHostToDevice));
     
     checkNvJpeg(nvjpegEncoderStateCreate(nv_handle, &nv_enc_state, stream));
     checkNvJpeg(nvjpegEncoderParamsCreate(nv_handle, &nv_enc_params, stream));
@@ -1250,7 +1274,7 @@ void Compressor::compress_jpeglib()
      * Here the array is only one element long, but you could pass
      * more than one scanline at a time if that's more convenient.
      */
-    row_pointer[0] = (JSAMPROW)& hostInputImageData[cinfo.next_scanline * row_stride];
+    row_pointer[0] = (JSAMPROW)& charInputData[cinfo.next_scanline * row_stride];
     (void) jpeg_write_scanlines(&cinfo, row_pointer, 1);
   }
 

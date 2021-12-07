@@ -17,7 +17,7 @@ then
     cd ../..
 fi
 # module load cuda
-export PATH=/usr/local/cuda-10.0/bin/:$PATH
-nvcc $1 -L$PWD/libwb/build/ -o $2 -I $PWD/libwb/ -std=c++11 -lwb -lnvjpeg -ljpeg -O3 -g
+
+nvcc $1 -L$PWD/libwb/build/ -o $2 -I $PWD/libwb/ -std=c++11 -lwb -lnvjpeg -ljpeg -O3 -g -DUSE_COMBINED_KERNEL -DUSE_CONSTANT_MEMORY -DPAGE_LOCK_HOST_BUFFERS -DCOALESCE_GLOBAL_ACCESSES -DSINGLE_GPU_BUFFER -DINPUT_TO_CHAR -DUSE_STREAMS -DOPT_LIST=\"USE_COMBINED_KERNEL___USE_CONSTANT_MEMORY___PAGE_LOCK_HOST_BUFFERS___COALESCE_GLOBAL_ACCESSES___SINGLE_GPU_BUFFER___INPUT_TO_CHAR___USE_STREAMS\"
 #-Xcompiler -Ofast -Xcompiler -mavx512f
 echo "Successfully built $2"
