@@ -11,13 +11,13 @@
 #define pi 3.14159265f
 #define sqrt1_2 0.707106781f
 
-#define USE_COMBINED_KERNEL
+/*#define USE_COMBINED_KERNEL
 #define PAGE_LOCK_HOST_BUFFERS
 #define USE_STREAMS
 #define SINGLE_GPU_BUFFER
 #define USE_CONSTANT_MEMORY
 #define INPUT_TO_CHAR
-
+*/
 //For comparison with state of the art
 #define USE_NVJPEG
 
@@ -634,7 +634,8 @@ Compressor::Compressor(wbArg_t args, bool _combined, WRITE_ONE_BYTE _output)
     init_codewords();
 
     bytesPerLine = imageWidth * imageChannels * (sizeof(T_Input) + sizeof(T_Quant));
-    size_t scratchSize = (NUM_STREAMS * LINES_PER_SLICE) * bytesPerLine;
+    unsigned int linesPerSlice = std::min(LINES_PER_SLICE,imageHeight);
+    size_t scratchSize = (NUM_STREAMS * linesPerSlice) * bytesPerLine;
     #ifdef SINGLE_GPU_BUFFER
     gpuMem.reset(scratchSize
         #ifndef USE_CONSTANT_MEMORY
