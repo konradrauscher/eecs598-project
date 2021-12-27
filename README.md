@@ -1,5 +1,10 @@
 # eecs598-project Compression with JPEG
 
+This project implements typical JFIF JPEG compression using a serial C++ implementation and an optimized CUDA GPU implementation. All code is contained in compress.cu, and the final report is available in EECS_598_Report.pdf.
+
+
+# Background Information
+
 Info about PPM images (used as the raw input image): http://netpbm.sourceforge.net/doc/ppm.html
 
 Process of JPEG compression: https://en.wikipedia.org/wiki/JPEG#JPEG_codec_example
